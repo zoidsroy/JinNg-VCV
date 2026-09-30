@@ -1,4 +1,4 @@
-﻿#include "plugin.hpp"
+#include "plugin.hpp"
 #include "Expander.hpp"
 #include "Serialize.hpp"
 #include "core/Engine.hpp"
@@ -297,6 +297,16 @@ struct IndexedQuadSeq : Module {
 			engine.transition = clamp(ctrl->switches[expander::SWITCH_TRANSITION], 0, 2);
 			engine.setPartInputs(ctrl->connected[expander::INPUT_SELECT], ctrl->inputs[expander::INPUT_SELECT],
 			                     ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f);
+			// The modulation bus: an unpatched gate reads low, an unpatched CV 0V.
+			iqs::ModBus bus;
+			const int cvIn[3] = {expander::INPUT_X_CV, expander::INPUT_Y_CV, expander::INPUT_Z_CV};
+			for (int c = 0; c < 3; c++) {
+				bus.cv[c] = ctrl->inputs[cvIn[c]];
+				bus.gate[c] = ctrl->connected[cvIn[c] + 1] && ctrl->inputs[cvIn[c] + 1] > 1.5f;
+			}
+			// Switch positions: type 0 low / 1 slope / 2 high; channel 0 Z / 1 Y / 2 X.
+			engine.setModulation(bus, clamp(ctrl->switches[expander::SWITCH_MODIFIER_TYPE], 0, 2),
+			                     2 - clamp(ctrl->switches[expander::SWITCH_MODIFIER_CHANNEL], 0, 2));
 		}
 		engine.turnLeft(leftTurns.exchange(0));
 		engine.turnRight(rightTurns.exchange(0));
@@ -365,12 +375,15 @@ struct IndexedQuadSeq : Module {
 			l = 0.f;
 		out->lights[expander::LIGHT_PART_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_PART));
 		out->lights[expander::LIGHT_GROUP_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP));
+		out->lights[expander::LIGHT_GROUP_MEMBER] = p.groupMemberLed(engine.editSeq());
 		out->lights[expander::LIGHT_MODIFIER_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP_MODIFIER));
 		out->lights[expander::LIGHT_ACTIVATE] = ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f;
 		out->lights[expander::LIGHT_RESET_TO] = p.resetToLed(engine.editSeq());
 		// The focused part, with a dot when it is the one playing.
 		std::snprintf(out->part, sizeof(out->part), "%d%s", p.focusedPart, p.focusedPart == engine.playingPart ? "." : "");
-		std::snprintf(out->group, sizeof(out->group), "--");
+		// The focused group (1-16), with a dot when it has members.
+		std::snprintf(out->group, sizeof(out->group), "%d%s", p.focusedGroup + 1,
+		              engine.editSeq().groupHasMembers(p.focusedGroup) ? "." : "");
 		rightExpander.module->leftExpander.requestMessageFlip();
 	}
 
@@ -571,6 +584,8 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 	std::function<std::string()> rightRow(int r, std::function<std::string(const iqs::Step&)> field,
 	                                      std::function<std::string(const iqs::TrackOptions&)> option) {
 		return fromView("--", [r, field, option](const iqs::PanelView& v) {
+			if (v.slopeScreen)
+				return iqs::formatSlopeShort(v.slopes[r]);
 			if (v.mathScreen && v.expander)
 				return std::to_string(iqs::transformValue(v.transform[r], v.transformOp[r]));
 			if (v.mathScreen)
@@ -637,8 +652,12 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		// VOLTAGE also shows the panel's messages (AFtr, FULL, TILt, Abrt ...).
 		// With PART focused, INDEX blinks the pending part (if any).
 		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0", fromView("0", [](const iqs::PanelView& v) {
+			if (v.euclid)
+				return std::to_string(v.euclidN);
 			if (v.leftFocus == FOCUS_PART)
 				return v.partPending >= 0 && v.blink ? std::to_string(v.partPending) : std::string("");
+			if (v.leftFocus == iqs::FOCUS_GROUP && !v.mathScreen && !v.slopeScreen)
+				return std::string("nS");
 			return std::to_string(v.index);
 		}));
 		addFocus(FOCUS_INDEX, L_BUTTON_X, L_LED_X, ROW_TOP);
@@ -651,6 +670,14 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", fromView("0.C.00", [](const iqs::PanelView& v) {
 			if (v.message)
 				return std::string(v.message);
+			// Choosing a Euclidean mask: "3" on INDEX and "Eu.8" here read as E(3, 8).
+			if (v.euclid)
+				return std::string("Eu.") + std::to_string(v.euclidM);
+			if (v.slopeScreen)
+				return iqs::formatSlope(v.slopes[v.slopeParam]);
+			// With GROUP focused: how many of this track's steps are in the group.
+			if (v.leftFocus == iqs::FOCUS_GROUP && !v.mathScreen)
+				return std::to_string(v.groupCount);
 			// With PART focused: the focused part at a glance, one digit per track with
 			// bars for RESET TO (top), LOOP START (middle) and LOOP END (bottom).
 			if (v.leftFocus == FOCUS_PART) {

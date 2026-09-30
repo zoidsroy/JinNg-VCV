@@ -144,6 +144,29 @@ ER-102 是 ER-101 的擴充器，放在 ER-101 的**右邊**。它本身沒有�
 
 ---
 
+### 4.3 實作（E3）
+- **資料**：每個 step 多存一個 16-bit 的 group 遮罩。16 個 group 的設定存在 `Sequence` 層級，包括破壞性運算、X/Y/Z 各一組 high 和 low 運算、3×4 的 slope 矩陣。snapshot、HOLD 和 Ctrl+Z 都會涵蓋這些資料。
+- **Euclidean 產生方式**：採用 Bjorklund 演算法的「配對」形式（Toussaint 論文的寫法）。
+  - 手冊第 13 頁的 9 個範例中，有 7 個完全相同。E(5,16) 和 E(7,17) 則是手冊印的圖樣的旋轉版本。
+  - 旋轉只改變起點，節奏本身不變，手冊也說遮罩可以依喜好旋轉；要調整時，可以用 ROTATE。
+  - 我比較過三種 Bresenham 寫法和遞迴版 Bjorklund，都沒有比這個更貼近手冊。
+- **Euclidean 模式的操作**：
+  - 進入時是 E(L,L)，L 是游標所在 pattern 的步數。focus 在 TRACK 時，範圍是整軌，但 L 仍取游標所在 pattern 的長度。
+  - 在這個模式中，只接受 (DE)SELECT（套用並離開）、DELETE（N 設為 0）、INDEX（N 在 0 與 M 之間切換）這三個鍵；其他按鍵會被忽略，放開時也不會觸發原本的動作。
+- **Group 的 MATH**：GROUP focus 時，MATH 編輯與套用的是這個 group 自己的運算，作用在**所有軌道**上屬於此 group 的 step。至於選取類的操作（COPY、DELETE、INVERT、ROTATE），依手冊只作用在目前的軌道。
+- **GROUP MODIFIERS 畫面**：按 GROUP MODIFIERS 鍵進入，再按一次離開。進入時左側 focus 自動移到 GROUP，右側 focus 則用來選參數（CV-A..GATE）。第一個開關撥在不同位置時：
+  - **slope**：左旋鈕換 group，右旋鈕改 slope。
+    - 右欄四個顯示器用簡短格式：整數 −9..99；小於 1 的非零值顯示 `0.` 或 `-0.`；−10 以下顯示 `--`。
+    - VOLTAGE 顯示 focus 參數的精確值，例如 `-0.05`。手冊說 VOLTAGE 應該顯示 K×V，這裡改成顯示 K 本身，因為兩位數的顯示器放不下精確的 slope 值。**[偏離手冊]**
+  - **high/low**：顯示方式和 5 運算的 MATH 畫面相同，左旋鈕選運算，右旋鈕改值，但不需要套用。
+- **播放時**：
+  - step 開始的那一刻，依序（group 0→15、通道 X→Y→Z）套用各通道的 high 或 low 運算，再加上 DURATION 和 GATE 的 slope，並四捨五入。
+  - Random 和 Jitter 在每次播放時重新產生亂數。
+  - CV-A 和 CV-B 的 slope 是在查完電壓表之後持續加上，輸出限制在 0–8.192V。
+  - 被調變成 DURATION=0 的 step 會被跳過；可播的都跳過時就停住。
+  - 不屬於任何 group 的 step 直接讀 sequence，所以編輯時可以立刻聽到修改。屬於 group 的 step，會在它下一次開始時才反映修改。
+- **Gate 輸入**：> 1.5V 為 high，沒插線視為 low。CV 輸入沒插線視為 0V。
+
 ## 5. Recording
 
 共用的操作：ARM 鍵對 focus 中的軌道切換錄音；PUNCH IN/OUT 鍵或 gate 輸入控制開始與結束；REC 燈表示正在錄音。

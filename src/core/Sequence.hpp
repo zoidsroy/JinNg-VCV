@@ -25,6 +25,9 @@ static constexpr float MAX_VOLTAGE = 8.192f;
 // Parts (expander): 1..99, plus the built-in STOP part 0.
 static constexpr int NUM_PARTS = 100;
 static constexpr int STOP_PART = 0;
+// Groups (expander) and the three channels (X, Y, Z) of the modulation bus.
+static constexpr int NUM_GROUPS = 16;
+static constexpr int NUM_MOD_CHANNELS = 3;
 
 struct Step {
 	uint8_t cvA = 12;
@@ -34,6 +37,7 @@ struct Step {
 	bool smoothA = false;
 	bool smoothB = false;
 	bool ratchet = false;
+	uint16_t groups = 0; // bit g: member of group g (expander)
 };
 
 struct Pattern {
@@ -107,6 +111,36 @@ struct Transform {
 	}
 };
 typedef std::array<Transform, MATH_PARAMS> TransformSet;
+
+// A group (expander): its own MATH transform for its member steps, and how the X/Y/Z
+// modulation bus acts on them while they play: per channel a HIGH and a LOW transform
+// (picked by that channel's gate) and a slope (gain) for each step parameter.
+struct Group {
+	TransformSet transform;
+	std::array<TransformSet, NUM_MOD_CHANNELS> high;
+	std::array<TransformSet, NUM_MOD_CHANNELS> low;
+	std::array<std::array<float, MATH_PARAMS>, NUM_MOD_CHANNELS> slope = {};
+
+	bool operator==(const Group& o) const {
+		return transform == o.transform && high == o.high && low == o.low && slope == o.slope;
+	}
+	bool operator!=(const Group& o) const {
+		return !(*this == o);
+	}
+	// Whether playback has anything to do for it.
+	bool modulates() const {
+		static const TransformSet identity;
+		for (int c = 0; c < NUM_MOD_CHANNELS; c++) {
+			if (high[c] != identity || low[c] != identity)
+				return true;
+			for (float k : slope[c]) {
+				if (k != 0.f)
+					return true;
+			}
+		}
+		return false;
+	}
+};
 
 struct VoltageTable {
 	std::array<float, TABLE_SIZE> volts;
@@ -212,6 +246,7 @@ struct Track {
 
 struct Sequence {
 	std::array<Track, NUM_TRACKS> tracks;
+	std::array<Group, NUM_GROUPS> groups;
 
 	int totalSteps() const {
 		int n = 0;
@@ -256,6 +291,17 @@ struct Sequence {
 			p = PartPoints();
 	}
 
+	// Whether any step of any track belongs to group g.
+	bool groupHasMembers(int g) const {
+		for (const Track& t : tracks) {
+			for (const Step& st : t.steps) {
+				if (st.groups & (1u << g))
+					return true;
+			}
+		}
+		return false;
+	}
+
 	bool partsEmpty() const {
 		for (const Track& t : tracks) {
 			for (const PartPoints& p : t.parts) {
@@ -269,6 +315,8 @@ struct Sequence {
 	// Whether two sequences hold the same music (steps, patterns, loops, flags, options,
 	// tables, math). Used to tell whether a burst of panel activity changed anything.
 	bool sameContent(const Sequence& o) const {
+		if (groups != o.groups)
+			return false;
 		for (int i = 0; i < NUM_TRACKS; i++) {
 			const Track& a = tracks[i];
 			const Track& b = o.tracks[i];
@@ -278,7 +326,7 @@ struct Sequence {
 				const Step& s = a.steps[k];
 				const Step& t = b.steps[k];
 				if (s.cvA != t.cvA || s.cvB != t.cvB || s.duration != t.duration || s.gate != t.gate ||
-				    s.smoothA != t.smoothA || s.smoothB != t.smoothB || s.ratchet != t.ratchet)
+				    s.smoothA != t.smoothA || s.smoothB != t.smoothB || s.ratchet != t.ratchet || s.groups != t.groups)
 					return false;
 			}
 			for (size_t k = 0; k < a.patterns.size(); k++) {
@@ -307,6 +355,8 @@ struct Sequence {
 	// Back to a fresh state: no steps, default tables, options and math. Unlike
 	// assigning a new Sequence this does not allocate.
 	void clearAll() {
+		for (Group& g : groups)
+			g = Group();
 		for (int i = 0; i < NUM_TRACKS; i++) {
 			clearTrack(i);
 			Track& t = tracks[i];

@@ -67,8 +67,9 @@ struct Playhead {
 		}
 	}
 
-	// Advances by one clock pulse.
-	void clock(const Track& t) {
+	// Advances by one clock pulse. `currentDuration` overrides the playing step's stored
+	// DURATION (the modulation bus can change it while it plays).
+	void clock(const Track& t, int currentDuration = -1) {
 		validate(t);
 		if (t.numSteps() == 0)
 			return;
@@ -86,7 +87,7 @@ struct Playhead {
 		}
 
 		pulse++;
-		if (pulse < t.steps[step].duration)
+		if (pulse < (currentDuration >= 0 ? currentDuration : t.steps[step].duration))
 			return;
 
 		int next = nextPlayable(t, step);
@@ -111,9 +112,13 @@ struct Playhead {
 		const Step* s = current(t);
 		if (!s || armed())
 			return false;
-		if (s->ratchet && s->gate > 0 && s->gate < s->duration)
-			return pulse % (2 * s->gate) < s->gate;
-		return pulse < std::min(s->gate, s->duration);
+		return gateOf(*s, pulse);
+	}
+
+	static bool gateOf(const Step& s, int pulse) {
+		if (s.ratchet && s.gate > 0 && s.gate < s.duration)
+			return pulse % (2 * s.gate) < s.gate;
+		return pulse < std::min(s.gate, s.duration);
 	}
 
 	float cvA(const Track& t) const {

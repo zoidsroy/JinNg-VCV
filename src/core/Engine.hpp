@@ -80,9 +80,20 @@ struct Engine {
 			tr.stopped = false;
 			for (int& r : tr.resetTargets)
 				r = -1;
+			panel.modifierMode = false;
+			panel.euclidActive = false;
 		}
 		expander = attached;
 		panel.expander = attached;
+		tr.modulation = attached;
+	}
+
+	// The expander's modulation bus (X/Y/Z CV and gate jacks) and the two GROUP
+	// MODIFIERS switches, every sample. `modifierType` is a ModifierType; channel 0 is X.
+	void setModulation(const ModBus& bus, int modifierType, int modifierChannel) {
+		tr.bus = bus;
+		panel.modifierType = modifierType;
+		panel.modifierChannel = std::max(0, std::min(modifierChannel, NUM_MOD_CHANNELS - 1));
 	}
 
 	// The expander's SELECT and ACTIVATE jacks, every sample. A patched SELECT picks the

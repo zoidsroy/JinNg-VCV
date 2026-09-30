@@ -1,9 +1,10 @@
-#pragma once
+﻿#pragma once
 // CLOCK / RESET / PAUSE handling and everything time-based for the four tracks
 // (docs/SPEC.md §3): per-track clock division and multiplication, trigger-mode gates,
 // and smoothed CV. Takes already-detected edges, so it stays independent of Rack.
 
 #include "ClockDivMul.hpp"
+#include "Groups.hpp"
 #include "Playhead.hpp"
 #include <cmath>
 
@@ -54,6 +55,14 @@ struct Transport {
 	TrackTime times[NUM_TRACKS];
 	uint8_t events[NUM_TRACKS] = {};
 
+	// The expander's modulation bus. While `modulation` is on, a step that belongs to a
+	// group is modulated when it starts (modulate()) and plays as `effective`.
+	bool modulation = false;
+	ModBus bus;
+	Rng rng;
+	Step effective[NUM_TRACKS];
+	bool useEffective[NUM_TRACKS] = {};
+
 	float sinceClock = INFINITY;
 	float sinceReset = INFINITY;
 	// Whether the last reset started the first step itself (rather than arming it).
@@ -66,6 +75,7 @@ struct Transport {
 	}
 
 	void rewindTrack(const Sequence& seq, int t, bool immediate, int target) {
+		useEffective[t] = false;
 		playheads[t].reset(seq.tracks[t], immediate, target);
 		if (!playheads[t].armed())
 			startStep(seq, t);
@@ -119,7 +129,7 @@ struct Transport {
 			bool pulse = external ? !swallowed : multiplied;
 
 			if (pulse) {
-				ph.clock(track);
+				ph.clock(track, useEffective[t] ? effective[t].duration : -1);
 				if (ph.pulse == 0)
 					startStep(seq, t);
 			}
@@ -141,7 +151,10 @@ struct Transport {
 		const Track& track = seq.tracks[t];
 		if (track.options.triggerMode)
 			return times[t].triggerLeft > 0.f;
-		return playheads[t].gate(track);
+		const Playhead& ph = playheads[t];
+		if (useEffective[t])
+			return !ph.armed() && Playhead::gateOf(effective[t], ph.pulse);
+		return ph.gate(track);
 	}
 
 	float cvA(const Sequence& seq, int t) const {
@@ -164,7 +177,43 @@ private:
 		return p;
 	}
 
+	// The step as it plays: modulated, or straight from the sequence (so edits to it are
+	// heard at once).
+	const Step* playing(const Track& track, int t) const {
+		return useEffective[t] ? &effective[t] : playheads[t].current(track);
+	}
+
+	// With the bus active, works out how the step that just started plays. A step the bus
+	// shortens to nothing is skipped, like a zero-length step.
+	bool modulateStep(const Sequence& seq, int t) {
+		const Track& track = seq.tracks[t];
+		Playhead& ph = playheads[t];
+		useEffective[t] = false;
+		if (!modulation)
+			return true;
+		for (int guard = 0; guard <= track.numSteps(); guard++) {
+			const Step* s = ph.current(track);
+			if (!s || !s->groups)
+				return true;
+			effective[t] = modulate(seq, *s, bus, rng);
+			if (effective[t].duration > 0) {
+				useEffective[t] = true;
+				return true;
+			}
+			int next = Playhead::nextPlayable(track, ph.step);
+			if (next < 0)
+				break;
+			ph.step = next;
+			ph.pulse = 0;
+		}
+		// Everything reachable was skipped: stall, as with all-zero durations.
+		ph.pulse = -1;
+		return false;
+	}
+
 	void startStep(const Sequence& seq, int t) {
+		if (!modulateStep(seq, t))
+			return;
 		const Track& track = seq.tracks[t];
 		TrackTime& tt = times[t];
 		tt.sinceStepStart = 0.f;
@@ -179,7 +228,7 @@ private:
 		events[t] |= e;
 		tt.lastStep = step;
 		tt.pattern = pattern;
-		const Step* s = playheads[t].current(track);
+		const Step* s = playing(track, t);
 		if (track.options.triggerMode && s && !s->ratchet && s->gate > 0) {
 			tt.triggerLeft = s->gate * TRIGGER_UNIT_S;
 			tt.triggersFired = 1;
@@ -193,7 +242,7 @@ private:
 		TrackTime& tt = times[t];
 		tt.triggerLeft -= dt;
 		const Playhead& ph = playheads[t];
-		const Step* s = ph.current(track);
+		const Step* s = playing(track, t);
 		if (!track.options.triggerMode || !s || ph.armed() || !s->ratchet)
 			return;
 		int n = s->gate;
@@ -216,11 +265,20 @@ private:
 	// Progress is counted in pulses plus the fraction of the current pulse elapsed, so
 	// the ramp follows tempo changes.
 	float cv(const Sequence& seq, int t, bool b) const {
-		const Track& track = seq.tracks[t];
-		const Playhead& ph = playheads[t];
-		const Step* s = ph.current(track);
+		const Step* s = playing(seq.tracks[t], t);
 		if (!s)
 			return 0.f;
+		float v = smoothedCv(seq, t, b, *s);
+		// The bus's CV slopes are added after the table lookup, continuously.
+		if (modulation && s->groups)
+			v = std::max(0.f, std::min(v + cvSlope(seq, s->groups, b ? MATH_CV_B : MATH_CV_A, bus), MAX_VOLTAGE));
+		return v;
+	}
+
+	float smoothedCv(const Sequence& seq, int t, bool b, const Step& step) const {
+		const Track& track = seq.tracks[t];
+		const Playhead& ph = playheads[t];
+		const Step* s = &step;
 		const VoltageTable& table = b ? track.tableB : track.tableA;
 		float from = table[b ? s->cvB : s->cvA];
 		if (ph.armed() || !smoothed(track, t, *s, b))

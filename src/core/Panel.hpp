@@ -8,6 +8,7 @@
 // copy (see Engine). COMMIT, LOAD/SAVE and RESET are handled by the Engine too.
 
 #include "Editor.hpp"
+#include "Groups.hpp"
 #include "Math.hpp"
 #include "Transform.hpp"
 #include "Transport.hpp"
@@ -70,6 +71,9 @@ enum InsertMode { INSERT_AFTER, INSERT_SPLIT, INSERT_BEFORE };
 
 enum Table { TABLE_A, TABLE_B, TABLE_REF };
 
+// The expander's GROUP MODIFIERS type switch, in its positions' order (0 = handle down).
+enum ModifierType { MODIFIER_LOW, MODIFIER_SLOPE, MODIFIER_HIGH };
+
 // LED state for indicators that can blink.
 enum Led { LED_OFF, LED_ON, LED_BLINK };
 
@@ -79,22 +83,25 @@ static constexpr uint8_t SEG_BOTTOM = 1 << 3;
 static constexpr uint8_t SEG_MIDDLE = 1 << 6;
 
 struct Clipboard {
-	enum Kind { NONE, STEPS, PATTERNS, TRACK, TABLE, PART };
+	enum Kind { NONE, STEPS, PATTERNS, TRACK, TABLE, PART, GROUP };
 	Kind kind = NONE;
 	std::vector<Step> steps;
 	std::vector<Pattern> patterns;
 	Track track;
 	VoltageTable table;
 	std::array<PartPoints, NUM_TRACKS> part;
+	std::vector<uint8_t> selection; // a group's members on one track, step by step
 
 	Clipboard() {
 		steps.reserve(MAX_TOTAL_STEPS);
 		patterns.reserve(MAX_PATTERNS);
+		selection.reserve(MAX_TOTAL_STEPS);
 	}
 	void clear() {
 		kind = NONE;
 		steps.clear();
 		patterns.clear();
+		selection.clear();
 	}
 };
 
@@ -135,6 +142,17 @@ struct PanelView {
 	int partPending = -1;
 	uint8_t partOverview[NUM_TRACKS] = {};
 	bool blink = false; // the blink phase, for displays that blink
+	// Groups (expander).
+	int groupFocused = 0;
+	bool groupHasMembers = false;
+	int groupCount = 0; // members on the selected track
+	bool groupMember = false; // the cursor's step is in the focused group
+	bool euclid = false; // choosing a Euclidean mask E(euclidN, euclidM)
+	int euclidN = 0;
+	int euclidM = 0;
+	bool slopeScreen = false; // editing a channel's slopes
+	float slopes[MATH_PARAMS] = {};
+	int slopeParam = MATH_CV_A;
 };
 
 struct Panel {
@@ -173,6 +191,13 @@ struct Panel {
 	int playingPart = 1;
 	int pendingPart = -1;
 	bool selectPatched = false; // the SELECT jack picks the part, not the LEFT knob
+	// Groups (expander).
+	int focusedGroup = 0;
+	bool euclidActive = false;
+	int euclidN = 0, euclidM = 1, euclidFirst = 0, euclidLast = -1;
+	bool modifierMode = false; // the GROUP MODIFIERS screen
+	int modifierType = MODIFIER_SLOPE; // set by the host from the switches
+	int modifierChannel = 0;           // 0 X, 1 Y, 2 Z
 	Rng rng;
 	int browseIndex = 0; // the voltage table entry INDEX points at
 	int refTable = 0;    // the reference table picked while TABLE is on REF
@@ -204,11 +229,20 @@ struct Panel {
 				applyMathToFocus(seq);
 			return;
 		}
+		if (euclidActive) {
+			pressInEuclid(seq, b);
+			held[b] = false;
+			return;
+		}
+		if (b == FOCUS_GROUP_MODIFIER) {
+			toggleModifierMode();
+			return;
+		}
 		if (mathScreen()) {
 			if (b == BUTTON_INVERT && expander) {
 				// Inverting the transform being edited.
-				Track& t = seq.tracks[track];
-				t.transform = invertedAll(t.transform);
+				TransformSet& tf = mathTarget(seq);
+				tf = invertedAll(tf);
 				held[b] = false;
 				return;
 			}
@@ -237,6 +271,15 @@ struct Panel {
 		}
 		if (b == BUTTON_DELETE && leftFocus == FOCUS_PART) {
 			clearPart(seq);
+			return;
+		}
+		if (b == BUTTON_DELETE && leftFocus == FOCUS_GROUP) {
+			for (Step& st : seq.tracks[track].steps)
+				setInGroup(st, focusedGroup, false);
+			return;
+		}
+		if (b == BUTTON_DESELECT) {
+			pressDeselect(seq);
 			return;
 		}
 		if ((b == BUTTON_INSERT || b == BUTTON_DELETE) && refuseEdit()) {
@@ -309,7 +352,15 @@ struct Panel {
 		if (d == 0)
 			return;
 		markChord();
-		if (mathScreen()) {
+		if (euclidActive) {
+			euclidN = std::max(0, std::min(euclidN + d, euclidM));
+			return;
+		}
+		if (modifierMode && modifierType == MODIFIER_SLOPE) {
+			focusedGroup = std::max(0, std::min(focusedGroup + d, NUM_GROUPS - 1));
+			return;
+		}
+		if (mathScreen() || editingModifierTransform()) {
 			if (expander) {
 				// The LEFT knob picks which operation of the focused parameter to edit.
 				int param = rightFocus - FOCUS_CV_A;
@@ -333,6 +384,9 @@ struct Panel {
 			return;
 		}
 		switch (leftFocus) {
+			case FOCUS_GROUP:
+				focusedGroup = std::max(0, std::min(focusedGroup + d, NUM_GROUPS - 1));
+				return;
 			case FOCUS_PART:
 				if (selectPatched)
 					flash("PLUG");
@@ -373,12 +427,31 @@ struct Panel {
 			return;
 		}
 		Track& t = seq.tracks[track];
+		if (euclidActive) {
+			euclidM = std::max(1, std::min(euclidM + d, MAX_EUCLID));
+			euclidN = std::min(euclidN, euclidM);
+			return;
+		}
+		if (modifierMode) {
+			int param = rightFocus - FOCUS_CV_A;
+			if (param < 0 || param >= MATH_PARAMS)
+				return;
+			Group& g = seq.groups[focusedGroup];
+			if (modifierType == MODIFIER_SLOPE) {
+				float& k = g.slope[modifierChannel][param];
+				k = adjustSlope(k, d);
+			}
+			else {
+				adjustTransform(modifierTarget(seq)[param], transformOp[param], d);
+			}
+			return;
+		}
 		if (mathScreen()) {
 			int param = rightFocus - FOCUS_CV_A;
 			if (param < 0 || param >= MATH_PARAMS)
 				return;
 			if (expander)
-				adjustTransform(t.transform[param], transformOp[param], d);
+				adjustTransform(mathTarget(seq)[param], transformOp[param], d);
 			else
 				adjustMathOperand(t.math[param], d);
 			return;
@@ -485,13 +558,19 @@ struct Panel {
 		    (clip.kind == Clipboard::PATTERNS && f == FOCUS_PATTERN) ||
 		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK) ||
 		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX) ||
-		    (clip.kind == Clipboard::PART && f == FOCUS_PART))
+		    (clip.kind == Clipboard::PART && f == FOCUS_PART) ||
+		    (clip.kind == Clipboard::GROUP && f == FOCUS_GROUP))
 			return LED_BLINK;
 		if (mathScreen() && isLeftFocus(f))
 			return f == FOCUS_TRACK + mathRow ? LED_ON : LED_OFF;
 		// The PART LED blinks while a part is waiting to play.
 		if (f == FOCUS_PART && pendingPart >= 0)
 			return LED_BLINK;
+		// GROUP and GROUP MODIFIERS blink while their screens are up.
+		if (f == FOCUS_GROUP && (euclidActive || modifierMode))
+			return LED_BLINK;
+		if (f == FOCUS_GROUP_MODIFIER)
+			return modifierMode ? LED_BLINK : LED_OFF;
 		return (f == leftFocus || f == rightFocus) ? LED_ON : LED_OFF;
 	}
 
@@ -548,6 +627,12 @@ struct Panel {
 		return start ? t.loopStart : t.loopEnd;
 	}
 
+	// The red LED by GROUP: the cursor's step is in the focused group.
+	bool groupMemberLed(const Sequence& seq) const {
+		const EditCursor& c = cursors[track];
+		return expander && c.step >= 0 && inGroup(seq.tracks[track].steps[c.step], focusedGroup);
+	}
+
 	// RESET TO LED: the cursor's step is the focused part's reset step.
 	bool resetToLed(const Sequence& seq) const {
 		const EditCursor& c = cursors[track];
@@ -578,6 +663,13 @@ struct Panel {
 		v.math = t.math;
 		v.expander = expander;
 		v.blink = blinkPhase();
+		v.groupFocused = focusedGroup;
+		v.groupHasMembers = seq.groupHasMembers(focusedGroup);
+		v.groupCount = countMembers(t, focusedGroup);
+		v.groupMember = groupMemberLed(seq);
+		v.euclid = euclidActive;
+		v.euclidN = euclidN;
+		v.euclidM = euclidM;
 		v.partFocused = focusedPart;
 		v.partPlaying = playingPart;
 		v.partPending = pendingPart;
@@ -586,9 +678,21 @@ struct Panel {
 			v.partOverview[i] = (uint8_t) ((p.resetTo >= 0 ? SEG_TOP : 0) | (p.loopStart >= 0 ? SEG_MIDDLE : 0) |
 			                               (p.loopEnd >= 0 ? SEG_BOTTOM : 0));
 		}
-		v.transform = t.transform;
+		v.transform = mathScreen() ? mathTargetConst(seq) : t.transform;
 		for (int i = 0; i < MATH_PARAMS; i++)
 			v.transformOp[i] = transformOp[i];
+		// The GROUP MODIFIERS screen: the HIGH/LOW transforms show like the MATH screen;
+		// slopes get their own.
+		if (editingModifierTransform()) {
+			v.mathScreen = true;
+			v.transform = modifierMode ? modifierTargetConst(seq) : v.transform;
+		}
+		if (modifierMode && modifierType == MODIFIER_SLOPE) {
+			v.slopeScreen = true;
+			for (int i = 0; i < MATH_PARAMS; i++)
+				v.slopes[i] = seq.groups[focusedGroup].slope[modifierChannel][i];
+			v.slopeParam = std::max(0, std::min(rightFocus - FOCUS_CV_A, MATH_PARAMS - 1));
+		}
 		return v;
 	}
 
@@ -784,7 +888,7 @@ private:
 		}
 		if (b == BUTTON_DELETE) {
 			if (expander)
-				t.transform = TransformSet();
+				mathTarget(seq) = TransformSet();
 			else
 				t.math = std::array<MathOp, MATH_PARAMS>();
 			return;
@@ -806,6 +910,20 @@ private:
 	// is held.
 	void applyMathToFocus(Sequence& seq) {
 		Track& t = seq.tracks[track];
+		// With GROUP focused the group's transform goes to its members, on every track.
+		if (expander && leftFocus == FOCUS_GROUP) {
+			const Group& g = seq.groups[focusedGroup];
+			TransformSet tf = held[BUTTON_INVERT] ? invertedAll(g.transform) : g.transform;
+			if (held[BUTTON_INVERT])
+				invertPending = false;
+			for (Track& tr : seq.tracks) {
+				for (int i = 0; i < tr.numSteps(); i++) {
+					if (inGroup(tr.steps[i], focusedGroup))
+						applyTransforms(tr, tf, i, i, rng);
+				}
+			}
+			return;
+		}
 		int first, last;
 		if (!focusRange(t, first, last)) {
 			const EditCursor& c = cursor();
@@ -851,6 +969,14 @@ private:
 	// parameter of those steps (spec ER-102 §6).
 	void rotoinvert(Sequence& seq, int op) {
 		Track& t = seq.tracks[track];
+		// With GROUP focused it is the selection that is inverted or shifted (this track).
+		if (leftFocus == FOCUS_GROUP) {
+			if (op == ROTO_REVERSE)
+				invertMembership(t, focusedGroup);
+			else
+				rotateMembership(t, focusedGroup, op == ROTO_SHIFT_FORWARD);
+			return;
+		}
 		int param = rightFocus - FOCUS_CV_A;
 		int first, last;
 		if (param < 0 || param >= MATH_PARAMS || !focusRange(t, first, last))
@@ -882,6 +1008,15 @@ private:
 		}
 		else if (leftFocus == FOCUS_PART && clip.kind == Clipboard::PART) {
 			pastePart(seq);
+			return;
+		}
+		else if (leftFocus == FOCUS_GROUP && clip.kind == Clipboard::GROUP) {
+			// Pasting a selection adds it to the focused group's (a union).
+			Track& t = seq.tracks[track];
+			for (int i = 0; i < t.numSteps() && i < (int) clip.selection.size(); i++) {
+				if (clip.selection[i])
+					setInGroup(t.steps[i], focusedGroup, true);
+			}
 			return;
 		}
 		if (!ok)
@@ -1075,6 +1210,14 @@ private:
 			clip.clear();
 			return;
 		}
+		// With GROUP focused, COPY takes the group's selection on this track.
+		if (leftFocus == FOCUS_GROUP) {
+			clip.clear();
+			for (const Step& st : t.steps)
+				clip.selection.push_back(inGroup(st, focusedGroup));
+			clip.kind = Clipboard::GROUP;
+			return;
+		}
 		// With PART focused, COPY takes the part's step assignments on every track.
 		if (leftFocus == FOCUS_PART) {
 			clip.clear();
@@ -1180,6 +1323,81 @@ private:
 			p.loopEnd = fit(p.loopEnd);
 			t.parts[focusedPart] = p;
 			followPlayingPart(t);
+		}
+	}
+
+	// --- Groups (expander) --------------------------------------------------------
+
+	// What MATH edits and applies: the focused group's transform with GROUP focused,
+	// otherwise the track's.
+	TransformSet& mathTarget(Sequence& seq) {
+		if (leftFocus == FOCUS_GROUP)
+			return seq.groups[focusedGroup].transform;
+		return seq.tracks[track].transform;
+	}
+	const TransformSet& mathTargetConst(const Sequence& seq) const {
+		if (leftFocus == FOCUS_GROUP)
+			return seq.groups[focusedGroup].transform;
+		return seq.tracks[track].transform;
+	}
+
+	// The GROUP MODIFIERS screen with the switch on HIGH or LOW edits that channel's
+	// non-destructive transform (with the MATH screen's controls, but nothing to apply).
+	bool editingModifierTransform() const {
+		return modifierMode && modifierType != MODIFIER_SLOPE;
+	}
+	TransformSet& modifierTarget(Sequence& seq) {
+		Group& g = seq.groups[focusedGroup];
+		return modifierType == MODIFIER_HIGH ? g.high[modifierChannel] : g.low[modifierChannel];
+	}
+	const TransformSet& modifierTargetConst(const Sequence& seq) const {
+		const Group& g = seq.groups[focusedGroup];
+		return modifierType == MODIFIER_HIGH ? g.high[modifierChannel] : g.low[modifierChannel];
+	}
+
+	void toggleModifierMode() {
+		modifierMode = !modifierMode;
+		if (modifierMode) {
+			leftFocus = FOCUS_GROUP;
+			if (rightFocus < FOCUS_CV_A || rightFocus > FOCUS_GATE)
+				rightFocus = FOCUS_CV_A;
+		}
+	}
+
+	// (DE)SELECT: with PATTERN or TRACK focused, start choosing a Euclidean mask; on a
+	// step, add it to or take it out of the focused group.
+	void pressDeselect(Sequence& seq) {
+		Track& t = seq.tracks[track];
+		const EditCursor& c = cursor();
+		if ((leftFocus == FOCUS_PATTERN || leftFocus == FOCUS_TRACK) && c.pattern >= 0) {
+			int first, last;
+			if (!focusRange(t, first, last))
+				return;
+			int length = std::max(1, std::min((int) t.patterns[c.pattern].length, MAX_EUCLID));
+			euclidActive = true;
+			euclidFirst = first;
+			euclidLast = last;
+			euclidN = euclidM = length; // E(L, L): everything
+			return;
+		}
+		if (c.step >= 0) {
+			Step& st = t.steps[c.step];
+			setInGroup(st, focusedGroup, !inGroup(st, focusedGroup));
+		}
+	}
+
+	// While choosing a mask: LEFT sets N, RIGHT sets M, DELETE makes it E(0, M), INDEX
+	// flips between E(0, M) and E(M, M), and (DE)SELECT applies it.
+	void pressInEuclid(Sequence& seq, int b) {
+		if (b == BUTTON_DESELECT) {
+			applyEuclid(seq.tracks[track], euclidFirst, euclidLast, focusedGroup, euclidN, euclidM);
+			euclidActive = false;
+		}
+		else if (b == BUTTON_DELETE) {
+			euclidN = 0;
+		}
+		else if (b == FOCUS_INDEX) {
+			euclidN = euclidN == 0 ? euclidM : 0;
 		}
 	}
 

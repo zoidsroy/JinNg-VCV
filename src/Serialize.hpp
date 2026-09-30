@@ -2,13 +2,15 @@
 // Patch (de)serialization of the sequence. Kept out of src/core because it uses
 // Rack's jansson.
 //
-// Each step is stored compactly as [cvA, cvB, duration, gate, flags] with flags
-// bit 0 = smooth A, bit 1 = smooth B, bit 2 = ratchet. Patterns are [length, flags]
-// with the same smooth bits.
+// A sequence is {"tracks": [...], "groups": [...]} (older patches: just the tracks
+// array). Each step is stored compactly as [cvA, cvB, duration, gate, flags, groups]
+// with flags bit 0 = smooth A, bit 1 = smooth B, bit 2 = ratchet, and groups the
+// membership mask. Patterns are [length, flags] with the same smooth bits.
 
 #include "plugin.hpp"
 #include "core/Sequence.hpp"
 #include "core/VoltageTables.hpp"
+#include "core/Groups.hpp"
 
 namespace iqs {
 
@@ -26,7 +28,100 @@ inline void tableFromJson(VoltageTable& tbl, json_t* a) {
 		tbl.volts[i] = clamp((float) json_number_value(json_array_get(a, i)), 0.f, MAX_VOLTAGE);
 }
 
+inline json_t* transformSetToJson(const TransformSet& tf) {
+	json_t* a = json_array();
+	for (const Transform& x : tf)
+		json_array_append_new(a, json_pack("[iiiii]", x.add, x.geo, x.jitter, x.random, x.quantize));
+	return a;
+}
+
+inline void transformSetFromJson(TransformSet& tf, json_t* a) {
+	for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(a); k++) {
+		json_t* xJ = json_array_get(a, k);
+		auto field = [&](size_t i, int lo, int hi) {
+			return clamp((int) json_integer_value(json_array_get(xJ, i)), lo, hi);
+		};
+		Transform& x = tf[k];
+		x.add = (int8_t) field(0, -MAX_VALUE, MAX_VALUE);
+		x.geo = (int8_t) field(1, -MAX_VALUE, MAX_VALUE);
+		x.jitter = (uint8_t) field(2, 0, MAX_VALUE);
+		x.random = (uint8_t) field(3, 0, MAX_VALUE);
+		x.quantize = (uint8_t) field(4, 1, MAX_VALUE);
+	}
+}
+
+// Only groups that differ from the default are stored.
+inline json_t* groupsToJson(const Sequence& seq) {
+	json_t* groupsJ = json_array();
+	for (int g = 0; g < NUM_GROUPS; g++) {
+		const Group& grp = seq.groups[g];
+		if (grp == Group())
+			continue;
+		json_t* gJ = json_object();
+		json_object_set_new(gJ, "index", json_integer(g));
+		json_object_set_new(gJ, "transform", transformSetToJson(grp.transform));
+		json_t* highJ = json_array();
+		json_t* lowJ = json_array();
+		json_t* slopeJ = json_array();
+		for (int c = 0; c < NUM_MOD_CHANNELS; c++) {
+			json_array_append_new(highJ, transformSetToJson(grp.high[c]));
+			json_array_append_new(lowJ, transformSetToJson(grp.low[c]));
+			json_t* row = json_array();
+			for (float k : grp.slope[c])
+				json_array_append_new(row, json_real(k));
+			json_array_append_new(slopeJ, row);
+		}
+		json_object_set_new(gJ, "high", highJ);
+		json_object_set_new(gJ, "low", lowJ);
+		json_object_set_new(gJ, "slope", slopeJ);
+		json_array_append_new(groupsJ, gJ);
+	}
+	return groupsJ;
+}
+
+inline void groupsFromJson(Sequence& seq, json_t* groupsJ) {
+	for (size_t i = 0; i < json_array_size(groupsJ); i++) {
+		json_t* gJ = json_array_get(groupsJ, i);
+		int g = (int) json_integer_value(json_object_get(gJ, "index"));
+		if (g < 0 || g >= NUM_GROUPS)
+			continue;
+		Group& grp = seq.groups[g];
+		transformSetFromJson(grp.transform, json_object_get(gJ, "transform"));
+		json_t* highJ = json_object_get(gJ, "high");
+		json_t* lowJ = json_object_get(gJ, "low");
+		json_t* slopeJ = json_object_get(gJ, "slope");
+		for (int c = 0; c < NUM_MOD_CHANNELS; c++) {
+			transformSetFromJson(grp.high[c], json_array_get(highJ, c));
+			transformSetFromJson(grp.low[c], json_array_get(lowJ, c));
+			json_t* row = json_array_get(slopeJ, c);
+			for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(row); k++)
+				grp.slope[c][k] = clamp((float) json_number_value(json_array_get(row, k)), -99.f, 99.f);
+		}
+	}
+}
+
+inline json_t* tracksToJson(const Sequence& seq);
+inline void tracksFromJson(Sequence& seq, json_t* tracksJ);
+
 inline json_t* sequenceToJson(const Sequence& seq) {
+	json_t* rootJ = json_object();
+	json_object_set_new(rootJ, "tracks", tracksToJson(seq));
+	json_object_set_new(rootJ, "groups", groupsToJson(seq));
+	return rootJ;
+}
+
+inline void sequenceFromJson(Sequence& seq, json_t* j) {
+	if (json_is_array(j)) { // before groups existed
+		tracksFromJson(seq, j);
+		return;
+	}
+	if (!json_is_object(j))
+		return;
+	tracksFromJson(seq, json_object_get(j, "tracks"));
+	groupsFromJson(seq, json_object_get(j, "groups"));
+}
+
+inline json_t* tracksToJson(const Sequence& seq) {
 	json_t* tracksJ = json_array();
 	for (const Track& t : seq.tracks) {
 		json_t* trackJ = json_object();
@@ -34,7 +129,7 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		json_t* stepsJ = json_array();
 		for (const Step& s : t.steps) {
 			int flags = (s.smoothA ? 1 : 0) | (s.smoothB ? 2 : 0) | (s.ratchet ? 4 : 0);
-			json_t* stepJ = json_pack("[iiiii]", s.cvA, s.cvB, s.duration, s.gate, flags);
+			json_t* stepJ = json_pack("[iiiiii]", s.cvA, s.cvB, s.duration, s.gate, flags, s.groups);
 			json_array_append_new(stepsJ, stepJ);
 		}
 		json_object_set_new(trackJ, "steps", stepsJ);
@@ -66,10 +161,7 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		for (const MathOp& op : t.math)
 			json_array_append_new(mathJ, json_pack("[ii]", op.type, op.operand));
 		json_object_set_new(trackJ, "math", mathJ);
-		json_t* transformJ = json_array();
-		for (const Transform& x : t.transform)
-			json_array_append_new(transformJ, json_pack("[iiiii]", x.add, x.geo, x.jitter, x.random, x.quantize));
-		json_object_set_new(trackJ, "transform", transformJ);
+		json_object_set_new(trackJ, "transform", transformSetToJson(t.transform));
 		// Parts: only the ones that set something, as [part, resetTo, loopStart, loopEnd].
 		json_t* partsJ = json_array();
 		for (int p = 0; p < NUM_PARTS; p++) {
@@ -85,7 +177,7 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 
 // Rebuilds the sequence, enforcing every hardware limit so a hand-edited or corrupt
 // patch cannot break playback invariants.
-inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
+inline void tracksFromJson(Sequence& seq, json_t* tracksJ) {
 	if (!json_is_array(tracksJ))
 		return;
 	seq.clearAll();
@@ -106,33 +198,7 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 			int lo = op.type == MATH_ADD || op.type == MATH_GEO ? -MAX_VALUE : 0;
 			op.operand = (int8_t) clamp((int) json_integer_value(json_array_get(opJ, 1)), lo, MAX_VALUE);
 		}
-		json_t* partsJ = json_object_get(trackJ, "parts");
-		for (size_t k = 0; k < json_array_size(partsJ); k++) {
-			json_t* pJ = json_array_get(partsJ, k);
-			int p = (int) json_integer_value(json_array_get(pJ, 0));
-			if (p <= STOP_PART || p >= NUM_PARTS)
-				continue;
-			auto point = [&](size_t i) {
-				int v = (int) json_integer_value(json_array_get(pJ, i));
-				return (int16_t) ((v >= 0 && v < t.numSteps()) ? v : -1);
-			};
-			t.parts[p].resetTo = point(1);
-			t.parts[p].loopStart = point(2);
-			t.parts[p].loopEnd = point(3);
-		}
-		json_t* transformJ = json_object_get(trackJ, "transform");
-		for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(transformJ); k++) {
-			json_t* xJ = json_array_get(transformJ, k);
-			auto field = [&](size_t i, int lo, int hi) {
-				return clamp((int) json_integer_value(json_array_get(xJ, i)), lo, hi);
-			};
-			Transform& x = t.transform[k];
-			x.add = (int8_t) field(0, -MAX_VALUE, MAX_VALUE);
-			x.geo = (int8_t) field(1, -MAX_VALUE, MAX_VALUE);
-			x.jitter = (uint8_t) field(2, 0, MAX_VALUE);
-			x.random = (uint8_t) field(3, 0, MAX_VALUE);
-			x.quantize = (uint8_t) field(4, 1, MAX_VALUE);
-		}
+		transformSetFromJson(t.transform, json_object_get(trackJ, "transform"));
 
 		json_t* stepsJ = json_object_get(trackJ, "steps");
 		json_t* patternsJ = json_object_get(trackJ, "patterns");
@@ -167,9 +233,26 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 				s.smoothA = flags & 1;
 				s.smoothB = flags & 2;
 				s.ratchet = flags & 4;
+				s.groups = (uint16_t) json_integer_value(json_array_get(stepJ, 5));
 				if (!seq.appendStep(ti, s))
 					break;
 			}
+		}
+
+		// Part points refer to steps, so they are read (and checked) after the steps.
+		json_t* partsJ = json_object_get(trackJ, "parts");
+		for (size_t k = 0; k < json_array_size(partsJ); k++) {
+			json_t* pJ = json_array_get(partsJ, k);
+			int p = (int) json_integer_value(json_array_get(pJ, 0));
+			if (p <= STOP_PART || p >= NUM_PARTS)
+				continue;
+			auto point = [&](size_t i) {
+				int v = (int) json_integer_value(json_array_get(pJ, i));
+				return (int16_t) ((v >= 0 && v < t.numSteps()) ? v : -1);
+			};
+			t.parts[p].resetTo = point(1);
+			t.parts[p].loopStart = point(2);
+			t.parts[p].loopEnd = point(3);
 		}
 
 		auto loopPoint = [&](const char* key) {
