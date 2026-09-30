@@ -182,6 +182,39 @@ ER-102 是 ER-101 的擴充器，放在 ER-101 的**右邊**。它本身沒有�
 
 ---
 
+### 5.1 實作（E4）
+- **共通**：
+  - 只套用有插線的輸入；沒插線的輸入，對應的 step 參數保持原值。**[手冊未寫，自行決定]**
+  - ARM 作用在目前選中的軌道。PUNCH 由按鍵切換，或由 PUNCH 的 gate 輸入控制（高電位時算 punch in）；gate 由高轉低時 punch out。
+  - RESET、PAUSE、切換錄音模式，都會結束錄音和 pass-thru。
+  - 錄音寫入時會增加 Ctrl+Z 的編輯計數，所以錄完之後可以用 Ctrl+Z 復原。
+- **alter**：寫入正在播放的序列。每一步在開始播放的那一刻，被輸入的值改寫。如果 loop 只框住一步，則持續改寫，讓電壓的變化立刻反映出來。
+- **step**：寫入正在編輯的序列，在 HOLD 模式下就是副本。
+  - D-1 上升沿：在各個 armed 軌道的編輯游標之後插入一步。新步以游標所在的步為基礎，再套用輸入的值；D-1 保持高電位期間，新步的參數持續跟著輸入變化。
+  - D-2 上升沿：刪除游標所在的那一步。
+- **real-time**：
+  - 時間以該軌經過除頻或倍頻後的 clock pulse 為單位，加上目前這個 pulse 已經走過的比例（`Transport::pulseTime`）。
+  - 開新的一步：
+    - AD-1 上升沿（音符開始）。
+    - 設定為 `tr` 的 CV-A 或 CV-B，在量化後的索引改變時；而且必須是在音符按住時，或 AD-1 沒插線時（legato）。
+  - 一步結束時：
+    - DURATION = 距離下一步開始的時間，四捨五入到格線，範圍 1..99。
+    - GATE = 按住的時間，四捨五入到它的格線；如果到下一步開始時還按著，就等於 DURATION。
+  - CV 值在這一步開始後半個 pulse 取樣。
+  - 錄進去的位置依設定畫面選的 focus 而定：
+    - TRACK：整軌最後新增一個 pattern。
+    - PATTERN：播放中的 pattern 之後新增一個 pattern。
+    - STEP：播放中的那一步之後。
+  - 一個 pattern 滿 100 步時，會自動接到新的 pattern；總數到 2000 步時，就停止錄音。
+  - 預設「等第一個音」才開始錄。
+  - **pass-thru**：armed、未 PAUSE，而且已經 punch in，或 punch out 狀態下偵測到音符（排練）。有插線的輸入會原封不動地送到該軌的輸出：A-1 → CV-A，A-2 → CV-B，AD-1 → GATE。錄音中，該軌原本的播放聲音被 pass-thru 取代。
+- **設定畫面**：在 real-time 模式下 arm 一軌時，會自動打開。
+  - CV-A、CV-B 的 focus 鍵：切換 `tr` / `--`。
+  - DURATION、GATE 的 focus 鍵：選中後，右旋鈕調整量化格線。
+  - TRACK、PATTERN、STEP 的 focus 鍵：選擇錄進去的位置，對應的 LED 會閃爍。
+  - 再按一次 ARM 關閉畫面。畫面沒開時按 ARM，則是解除 arm。
+  - 這份設定是四軌共用的，會存在 patch 裡。
+
 ## 6. Rotoinversion（INVERT / ROTATE）
 
 | focus | INVERT | INVERT+ROTATE | ROTATE |

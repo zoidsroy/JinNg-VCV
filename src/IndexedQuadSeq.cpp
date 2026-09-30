@@ -307,6 +307,21 @@ struct IndexedQuadSeq : Module {
 			// Switch positions: type 0 low / 1 slope / 2 high; channel 0 Z / 1 Y / 2 X.
 			engine.setModulation(bus, clamp(ctrl->switches[expander::SWITCH_MODIFIER_TYPE], 0, 2),
 			                     2 - clamp(ctrl->switches[expander::SWITCH_MODIFIER_CHANNEL], 0, 2));
+			// Recording inputs; the digital ones (D-1, D-2, PUNCH) trigger above 1.5V.
+			iqs::RecordInputs rec;
+			rec.a1 = ctrl->inputs[expander::INPUT_A1];
+			rec.a2 = ctrl->inputs[expander::INPUT_A2];
+			rec.ad1 = ctrl->inputs[expander::INPUT_AD1];
+			rec.ad2 = ctrl->inputs[expander::INPUT_AD2];
+			rec.a1Patched = ctrl->connected[expander::INPUT_A1];
+			rec.a2Patched = ctrl->connected[expander::INPUT_A2];
+			rec.ad1Patched = ctrl->connected[expander::INPUT_AD1];
+			rec.ad2Patched = ctrl->connected[expander::INPUT_AD2];
+			rec.d1 = ctrl->inputs[expander::INPUT_D1] > 1.5f;
+			rec.d2 = ctrl->inputs[expander::INPUT_D2] > 1.5f;
+			rec.punchGate = ctrl->connected[expander::INPUT_PUNCH] && ctrl->inputs[expander::INPUT_PUNCH] > 1.5f;
+			// Switch positions: 0 real-time, 1 step, 2 alter.
+			engine.setRecordInputs(rec, clamp(ctrl->switches[expander::SWITCH_RECORD_MODE], 0, 2));
 		}
 		engine.turnLeft(leftTurns.exchange(0));
 		engine.turnRight(rightTurns.exchange(0));
@@ -340,7 +355,7 @@ struct IndexedQuadSeq : Module {
 			const iqs::Panel& p = engine.panel;
 			const iqs::Sequence& shown = engine.editSeq();
 			for (int f = 0; f < NUM_SEQUENCER_FOCUS; f++)
-				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(p.focusLed(f)));
+				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(engine.focusLed(f)));
 			lights[COPY_LIGHT].setBrightness(p.copyLed());
 			lights[SMOOTH_LIGHT].setBrightness(p.smoothLed(shown));
 			lights[VOLTAGE_GRAIN_LIGHT].setBrightness(ledBrightness(p.grainLed(shown)));
@@ -373,10 +388,16 @@ struct IndexedQuadSeq : Module {
 		const iqs::Panel& p = engine.panel;
 		for (float& l : out->lights)
 			l = 0.f;
-		out->lights[expander::LIGHT_PART_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_PART));
-		out->lights[expander::LIGHT_GROUP_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP));
+		out->lights[expander::LIGHT_PART_FOCUS] = ledBrightness(engine.focusLed(iqs::FOCUS_PART));
+		out->lights[expander::LIGHT_GROUP_FOCUS] = ledBrightness(engine.focusLed(iqs::FOCUS_GROUP));
 		out->lights[expander::LIGHT_GROUP_MEMBER] = p.groupMemberLed(engine.editSeq());
-		out->lights[expander::LIGHT_MODIFIER_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP_MODIFIER));
+		out->lights[expander::LIGHT_MODIFIER_FOCUS] = ledBrightness(engine.focusLed(iqs::FOCUS_GROUP_MODIFIER));
+		// ARM: the selected track is armed (blinking while the configuration screen is up).
+		// REC: recording is under way.
+		const iqs::Recorder& rec = engine.recorder;
+		out->lights[expander::LIGHT_ARM] =
+			rec.configScreen ? (p.blinkPhase() ? 1.f : 0.f) : (float) rec.armed[p.track];
+		out->lights[expander::LIGHT_REC] = rec.recording(engine.tr.paused);
 		out->lights[expander::LIGHT_ACTIVATE] = ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f;
 		out->lights[expander::LIGHT_RESET_TO] = p.resetToLed(engine.editSeq());
 		// The focused part, with a dot when it is the one playing.
@@ -408,6 +429,14 @@ struct IndexedQuadSeq : Module {
 		json_object_set_new(rootJ, "selectedTrack", json_integer(engine.panel.track));
 		json_object_set_new(rootJ, "focusedPart", json_integer(engine.panel.focusedPart));
 		json_object_set_new(rootJ, "playingPart", json_integer(engine.playingPart));
+		const iqs::RealtimeConfig& rc = engine.recorder.config;
+		json_t* recJ = json_object();
+		json_object_set_new(recJ, "cvATrigger", json_boolean(rc.cvATrigger));
+		json_object_set_new(recJ, "cvBTrigger", json_boolean(rc.cvBTrigger));
+		json_object_set_new(recJ, "durationGrid", json_integer(rc.durationGrid));
+		json_object_set_new(recJ, "gateGrid", json_integer(rc.gateGrid));
+		json_object_set_new(recJ, "focus", json_integer(rc.focus));
+		json_object_set_new(rootJ, "recording", recJ);
 		return rootJ;
 	}
 
@@ -437,6 +466,15 @@ struct IndexedQuadSeq : Module {
 		if (json_t* j = json_object_get(rootJ, "selectedTrack"))
 			engine.panel.track = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
 		engine.liveReplaced();
+		if (json_t* recJ = json_object_get(rootJ, "recording")) {
+			iqs::RealtimeConfig& rc = engine.recorder.config;
+			rc.cvATrigger = json_boolean_value(json_object_get(recJ, "cvATrigger"));
+			rc.cvBTrigger = json_boolean_value(json_object_get(recJ, "cvBTrigger"));
+			rc.durationGrid = clamp((int) json_integer_value(json_object_get(recJ, "durationGrid")), 1, iqs::MAX_VALUE);
+			rc.gateGrid = clamp((int) json_integer_value(json_object_get(recJ, "gateGrid")), 1, iqs::MAX_VALUE);
+			int focus = (int) json_integer_value(json_object_get(recJ, "focus"));
+			rc.focus = (focus == FOCUS_PATTERN || focus == FOCUS_STEP) ? focus : FOCUS_TRACK;
+		}
 		if (json_t* j = json_object_get(rootJ, "focusedPart"))
 			engine.panel.focusedPart = clamp((int) json_integer_value(j), 0, iqs::NUM_PARTS - 1);
 		if (json_t* j = json_object_get(rootJ, "playingPart")) {
@@ -584,6 +622,16 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 	std::function<std::string()> rightRow(int r, std::function<std::string(const iqs::Step&)> field,
 	                                      std::function<std::string(const iqs::TrackOptions&)> option) {
 		return fromView("--", [r, field, option](const iqs::PanelView& v) {
+			// The real-time recording configuration: CV-A/CV-B trigger new steps (tr) or not
+			// (--), then the DURATION and GATE quantization grids.
+			if (v.recordConfig) {
+				switch (r) {
+					case iqs::MATH_CV_A: return std::string(v.recordCvATrigger ? "tr" : "--");
+					case iqs::MATH_CV_B: return std::string(v.recordCvBTrigger ? "tr" : "--");
+					case iqs::MATH_DURATION: return std::to_string(v.recordDurationGrid);
+					default: return std::to_string(v.recordGateGrid);
+				}
+			}
 			if (v.slopeScreen)
 				return iqs::formatSlopeShort(v.slopes[r]);
 			if (v.mathScreen && v.expander)

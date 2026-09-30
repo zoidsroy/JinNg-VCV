@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // CLOCK / RESET / PAUSE handling and everything time-based for the four tracks
 // (docs/SPEC.md §3): per-track clock division and multiplication, trigger-mode gates,
 // and smoothed CV. Takes already-detected edges, so it stays independent of Rack.
@@ -43,7 +43,7 @@ struct Transport {
 	// Boundaries a track crossed during the last process() call. A step starting is always
 	// EVENT_STEP; it is also EVENT_PATTERN when it is in another pattern, and EVENT_TRACK
 	// (and EVENT_PATTERN) when playback wrapped around, i.e. the track ended.
-	enum Event : uint8_t { EVENT_STEP = 1, EVENT_PATTERN = 2, EVENT_TRACK = 4 };
+	enum Event : uint8_t { EVENT_STEP = 1, EVENT_PATTERN = 2, EVENT_TRACK = 4, EVENT_PULSE = 8 };
 
 	int resetMode = RESET_ARMS_FIRST_STEP;
 	bool paused = false;
@@ -54,6 +54,8 @@ struct Transport {
 	Playhead playheads[NUM_TRACKS];
 	TrackTime times[NUM_TRACKS];
 	uint8_t events[NUM_TRACKS] = {};
+	// Pulses each track has received, for measuring time in pulses (recording).
+	long pulseCount[NUM_TRACKS] = {};
 
 	// The expander's modulation bus. While `modulation` is on, a step that belongs to a
 	// group is modulated when it starts (modulate()) and plays as `effective`.
@@ -129,6 +131,8 @@ struct Transport {
 			bool pulse = external ? !swallowed : multiplied;
 
 			if (pulse) {
+				pulseCount[t]++;
+				events[t] |= EVENT_PULSE;
 				ph.clock(track, useEffective[t] ? effective[t].duration : -1);
 				if (ph.pulse == 0)
 					startStep(seq, t);
@@ -163,6 +167,14 @@ struct Transport {
 
 	float cvB(const Sequence& seq, int t) const {
 		return cv(seq, t, true);
+	}
+
+	// Time on the track's own clock, in pulses: whole pulses so far plus how far into the
+	// current one we are (while the period is known).
+	double pulseTime(int t) const {
+		float period = pulsePeriod(t);
+		double phase = period > 0.f ? std::min(times[t].sincePulse / period, 0.999f) : 0.0;
+		return pulseCount[t] + phase;
 	}
 
 	// The track's pulse period in seconds, 0 while unknown.

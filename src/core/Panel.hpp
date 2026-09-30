@@ -153,6 +153,10 @@ struct PanelView {
 	bool slopeScreen = false; // editing a channel's slopes
 	float slopes[MATH_PARAMS] = {};
 	int slopeParam = MATH_CV_A;
+	// Recording (expander): the real-time configuration screen.
+	bool recordConfig = false;
+	bool recordCvATrigger = true, recordCvBTrigger = false;
+	int recordDurationGrid = 1, recordGateGrid = 1;
 };
 
 struct Panel {

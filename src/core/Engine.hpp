@@ -10,6 +10,7 @@
 // Plain C++ with no Rack dependency; the module feeds it edges and reads outputs back.
 
 #include "Panel.hpp"
+#include "Recorder.hpp"
 #include "Transport.hpp"
 #include <array>
 
@@ -50,6 +51,8 @@ struct Engine {
 	bool loopDone[NUM_TRACKS] = {}; // LAST: which tracks finished a loop since activation
 	bool activateHigh = false;
 
+	Recorder recorder;
+
 	int pendingCommit = Q_NONE;
 	int commitTrack = 0;
 	int pendingReset = Q_NONE;
@@ -86,6 +89,17 @@ struct Engine {
 		expander = attached;
 		panel.expander = attached;
 		tr.modulation = attached;
+	}
+
+	// The expander's recording inputs and RECORD MODE switch, every sample. Changing mode
+	// ends any recording in progress.
+	void setRecordInputs(const RecordInputs& in, int recordMode) {
+		recorder.in = in;
+		if (recordMode != recorder.mode) {
+			recorder.punchOut(live, tr, editGeneration);
+			recorder.configScreen = false;
+			recorder.mode = recordMode;
+		}
 	}
 
 	// The expander's modulation bus (X/Y/Z CV and gate jacks) and the two GROUP
@@ -175,6 +189,10 @@ struct Engine {
 
 	void press(int b) {
 		editGeneration++;
+		if (expander && recorder.configScreen) {
+			pressInRecordConfig(b);
+			return;
+		}
 		// LOAD / SAVE ask for a second press ("Abrt" flashes meanwhile); anything else
 		// cancels.
 		if (snapshotArmed != SNAP_NONE) {
@@ -191,6 +209,16 @@ struct Engine {
 				panel.markChord();
 				if (expander)
 					activatePart();
+				return;
+			case BUTTON_ARM:
+				panel.markChord();
+				if (expander)
+					recorder.pressArm(live, tr, panel.track, editGeneration);
+				return;
+			case BUTTON_PUNCH:
+				panel.markChord();
+				if (expander)
+					recorder.pressPunch(live, tr, editGeneration);
 				return;
 			case BUTTON_COMMIT:
 				panel.markChord();
@@ -232,6 +260,14 @@ struct Engine {
 		if (d == 0)
 			return;
 		editGeneration++;
+		if (expander && recorder.configScreen) {
+			// The RIGHT knob sets the focused quantization grid.
+			RealtimeConfig& c = recorder.config;
+			int& grid = panel.rightFocus == FOCUS_GATE ? c.gateGrid : c.durationGrid;
+			if (panel.rightFocus == FOCUS_GATE || panel.rightFocus == FOCUS_DURATION)
+				grid = std::max(1, std::min(grid + d, MAX_VALUE));
+			return;
+		}
 		panel.turnRight(editSeq(), d);
 	}
 
@@ -258,6 +294,11 @@ struct Engine {
 		tr.process(live, dt, clockEdge, resetEdge, resetHeld);
 		if (expander && pendingPart >= 0)
 			checkPartTransition();
+		if (expander) {
+			if (resetEdge)
+				recorder.punchOut(live, tr, editGeneration);
+			recorder.process(live, tr, editSeq(), editTr(), panel, editGeneration);
+		}
 
 		if (pendingCommit != Q_NONE && reached(pendingCommit, commitTrack))
 			commit();
@@ -271,14 +312,44 @@ struct Engine {
 		panel.tick(dt);
 	}
 
-	float cvA(int t) const { return tr.cvA(live, t); }
-	float cvB(int t) const { return tr.cvB(live, t); }
-	bool gate(int t) const { return tr.gate(live, t); }
+	// Outputs. While a track records in real time the patched inputs pass straight
+	// through to it (A-1 to CV-A, A-2 to CV-B, AD-1 to GATE), unprocessed.
+	float cvA(int t) const {
+		if (passThru(t) && recorder.in.a1Patched)
+			return recorder.in.a1;
+		return tr.cvA(live, t);
+	}
+	float cvB(int t) const {
+		if (passThru(t) && recorder.in.a2Patched)
+			return recorder.in.a2;
+		return tr.cvB(live, t);
+	}
+	bool gate(int t) const {
+		if (passThru(t) && recorder.in.ad1Patched)
+			return recorder.gateHigh();
+		return tr.gate(live, t);
+	}
+	bool passThru(int t) const {
+		return expander && recorder.passThru(t, tr.paused);
+	}
+
+	// Focus LEDs: on the recording configuration screen, TRACK/PATTERN/STEP blink to show
+	// where a take goes.
+	Led focusLed(int f) const {
+		if (expander && recorder.configScreen && (f == FOCUS_TRACK || f == FOCUS_PATTERN || f == FOCUS_STEP))
+			return f == recorder.config.focus ? LED_BLINK : LED_OFF;
+		return panel.focusLed(f);
+	}
 
 	PanelView view() const {
 		PanelView v = panel.view(editSeq());
 		v.partPlaying = playingPart;
 		v.partPending = pendingPart;
+		v.recordConfig = expander && recorder.configScreen;
+		v.recordCvATrigger = recorder.config.cvATrigger;
+		v.recordCvBTrigger = recorder.config.cvBTrigger;
+		v.recordDurationGrid = recorder.config.durationGrid;
+		v.recordGateGrid = recorder.config.gateGrid;
 		v.snapshot = snapshotSlot;
 		if (snapshotArmed != SNAP_NONE)
 			v.message = panel.blinkPhase() ? "Abrt" : "";
@@ -340,6 +411,24 @@ private:
 			}
 			if (reset && p.resetTo >= 0)
 				tr.rewindTrack(live, t, immediate, p.resetTo);
+		}
+	}
+
+	// The real-time configuration screen (manual p.19): CV-A/CV-B toggle whether a CV
+	// change starts a step, DURATION/GATE focus their quantization grid for the RIGHT
+	// knob, TRACK/PATTERN/STEP choose where the take goes, and ARM closes it.
+	void pressInRecordConfig(int b) {
+		RealtimeConfig& c = recorder.config;
+		switch (b) {
+			case BUTTON_ARM: recorder.configScreen = false; break;
+			case FOCUS_CV_A: c.cvATrigger = !c.cvATrigger; break;
+			case FOCUS_CV_B: c.cvBTrigger = !c.cvBTrigger; break;
+			case FOCUS_DURATION:
+			case FOCUS_GATE: panel.rightFocus = b; break;
+			case FOCUS_TRACK:
+			case FOCUS_PATTERN:
+			case FOCUS_STEP: c.focus = b; break;
+			default: break;
 		}
 	}
 
