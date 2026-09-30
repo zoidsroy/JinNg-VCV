@@ -1,0 +1,8 @@
+/build/
+/dist/
+/dep/
+*.o
+*.d
+plugin.dll
+plugin.so
+plugin.dylib
