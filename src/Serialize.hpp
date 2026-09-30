@@ -8,6 +8,7 @@
 
 #include "plugin.hpp"
 #include "core/Sequence.hpp"
+#include "core/VoltageTables.hpp"
 
 namespace iqs {
 
@@ -60,6 +61,7 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		json_object_set_new(trackJ, "loopEnd", json_integer(t.loopEnd));
 		json_object_set_new(trackJ, "tableA", tableToJson(t.tableA));
 		json_object_set_new(trackJ, "tableB", tableToJson(t.tableB));
+		json_object_set_new(trackJ, "voltageGrain", json_integer(t.voltageGrain));
 		json_array_append_new(tracksJ, trackJ);
 	}
 	return tracksJ;
@@ -79,6 +81,7 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 
 		tableFromJson(t.tableA, json_object_get(trackJ, "tableA"));
 		tableFromJson(t.tableB, json_object_get(trackJ, "tableB"));
+		t.voltageGrain = (uint8_t) clamp((int) json_integer_value(json_object_get(trackJ, "voltageGrain")), 0, GRAIN_LEN - 1);
 
 		json_t* stepsJ = json_object_get(trackJ, "steps");
 		json_t* patternsJ = json_object_get(trackJ, "patterns");

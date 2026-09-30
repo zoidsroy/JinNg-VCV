@@ -3,11 +3,12 @@
 // buttons. It receives press/release/turn events and edits the sequence directly, so
 // it must run on the audio thread, which is the only place the sequence changes.
 //
-// Covers EDIT-mode editing, SMOOTH and the track options screen. The MODE switch, MATH,
-// snapshots and voltage table editing come in later stages.
+// Covers EDIT-mode editing, SMOOTH, the track options screen and voltage tables. The MODE
+// switch, MATH and snapshots come in later stages.
 
 #include "Editor.hpp"
 #include "Transport.hpp"
+#include "VoltageTables.hpp"
 
 namespace iqs {
 
@@ -50,11 +51,12 @@ enum Table { TABLE_A, TABLE_B, TABLE_REF };
 enum Led { LED_OFF, LED_ON, LED_BLINK };
 
 struct Clipboard {
-	enum Kind { NONE, STEPS, PATTERNS, TRACK };
+	enum Kind { NONE, STEPS, PATTERNS, TRACK, TABLE };
 	Kind kind = NONE;
 	std::vector<Step> steps;
 	std::vector<Pattern> patterns;
 	Track track;
+	VoltageTable table;
 
 	Clipboard() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -86,6 +88,7 @@ struct PanelView {
 	int index = 0;
 	float voltage = 0.f;
 	bool noteDisplay = true; // VOLTAGE as a note (Nt) or a number (Nr)
+	int grain = GRAIN_FINE;  // voltage editing granularity
 	const char* message = nullptr;
 	bool optionsScreen = false;
 	TrackOptions options;
@@ -108,6 +111,10 @@ struct Panel {
 	int copyAnchor = -1;
 	bool deleteArmed = false;
 	bool optionsScreen = false;
+	int browseIndex = 0; // the voltage table entry INDEX points at
+	int refTable = 0;    // the reference table picked while TABLE is on REF
+	RefTables ownRefs;
+	RefTables* refs = &ownRefs; // the host points this at the shared user tables
 	const char* message = nullptr;
 	float messageTime = 0.f;
 	float time = 0.f;
@@ -196,6 +203,9 @@ struct Panel {
 			case FOCUS_STEP:
 				moveStep(seq, d);
 				break;
+			case FOCUS_INDEX:
+				browseIndex = std::max(0, std::min(browseIndex + d, TABLE_SIZE - 1));
+				return;
 			default:
 				return;
 		}
@@ -215,6 +225,17 @@ struct Panel {
 		Track& t = seq.tracks[track];
 		if (optionsScreen) {
 			editOption(t.options, rightFocus, d);
+			return;
+		}
+		// With TABLE on REF, the right encoder picks the reference table when INDEX or
+		// VOLTAGE has focus.
+		if (table == TABLE_REF && (leftFocus == FOCUS_INDEX || rightFocus == FOCUS_VOLTAGE)) {
+			refTable = std::max(0, std::min(refTable + d, NUM_REF_TABLES - 1));
+			flash(refTableName(refTable));
+			return;
+		}
+		if (rightFocus == FOCUS_VOLTAGE) {
+			editVoltage(seq, d);
 			return;
 		}
 		int pos = cursor().step;
@@ -259,13 +280,21 @@ struct Panel {
 		// A filled clipboard blinks the display that says what it holds.
 		if ((clip.kind == Clipboard::STEPS && f == FOCUS_STEP) ||
 		    (clip.kind == Clipboard::PATTERNS && f == FOCUS_PATTERN) ||
-		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK))
+		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK) ||
+		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX))
 			return LED_BLINK;
 		return (f == leftFocus || f == rightFocus) ? LED_ON : LED_OFF;
 	}
 
 	bool copyLed() const {
 		return clip.kind != Clipboard::NONE;
+	}
+
+	// The lower VOLTAGE LED shows the editing granularity: off fine, on coarse, blinking
+	// super coarse.
+	Led grainLed(const Sequence& seq) const {
+		int g = seq.tracks[track].voltageGrain;
+		return g == GRAIN_FINE ? LED_OFF : (g == GRAIN_COARSE ? LED_ON : LED_BLINK);
 	}
 
 	// Lit when the cursor's step is smoothed on the selected table, whether by its own
@@ -312,14 +341,11 @@ struct Panel {
 		if (c.step >= 0) {
 			v.step = t.steps[c.step];
 			v.stepInPattern = c.step - edit::patternStart(t, c.pattern);
-			bool useB = table == TABLE_B;
-			v.index = useB ? v.step.cvB : v.step.cvA;
-			v.voltage = useB ? t.tableB[v.index] : t.tableA[v.index];
 		}
-		else {
-			v.voltage = t.tableA[0];
-		}
+		v.index = activeIndex(seq);
+		v.voltage = activeTable(seq)[v.index];
 		v.noteDisplay = table == TABLE_B ? t.options.noteDisplayB : t.options.noteDisplayA;
+		v.grain = t.voltageGrain;
 		v.message = currentMessage();
 		v.optionsScreen = optionsScreen;
 		v.options = t.options;
@@ -327,7 +353,7 @@ struct Panel {
 	}
 
 	const char* currentMessage() const {
-		if (held[BUTTON_INSERT]) {
+		if (held[BUTTON_INSERT] && (leftFocus == FOCUS_STEP || leftFocus == FOCUS_PATTERN)) {
 			static const char* const words[3] = {"AFtr", "SPLt", "bEFr"};
 			return words[insertMode];
 		}
@@ -390,8 +416,19 @@ private:
 			return;
 		}
 
+		// Focusing INDEX starts browsing at the entry the cursor's step uses.
+		if (!focusPress && f == FOCUS_INDEX && table != TABLE_REF && cursor().step >= 0) {
+			const Step& s = seq.tracks[track].steps[cursor().step];
+			browseIndex = table == TABLE_B ? s.cvB : s.cvA;
+		}
+
 		if (!focusPress)
 			return;
+		// A focus press on VOLTAGE cycles fine -> coarse -> super coarse.
+		if (f == FOCUS_VOLTAGE) {
+			uint8_t& g = seq.tracks[track].voltageGrain;
+			g = (uint8_t) ((g + 1) % GRAIN_LEN);
+		}
 		if (f == FOCUS_GATE) {
 			int pos = cursor().step;
 			if (pos >= 0) {
@@ -482,6 +519,10 @@ private:
 		else if (leftFocus == FOCUS_TRACK && clip.kind == Clipboard::TRACK) {
 			ok = edit::replaceTrack(seq, track, clip.track, ph);
 			normalize(seq.tracks[track], cursor());
+		}
+		else if (leftFocus == FOCUS_INDEX && clip.kind == Clipboard::TABLE) {
+			pasteTable(seq);
+			return;
 		}
 		if (!ok)
 			flash("FULL");
@@ -607,6 +648,60 @@ private:
 	// --- COPY ------------------------------------------------------------------
 
 	// The cursor position a copy range is measured in: a step, or a pattern.
+	// --- Voltage tables ----------------------------------------------------------
+
+	// The table the TABLE switch selects: the track's A or B, or the chosen reference.
+	const VoltageTable& activeTable(const Sequence& seq) const {
+		const Track& t = seq.tracks[track];
+		if (table == TABLE_REF)
+			return refs->get(refTable);
+		return table == TABLE_B ? t.tableB : t.tableA;
+	}
+
+	// The entry INDEX and VOLTAGE show: the browsed one while INDEX has focus (and always
+	// for reference tables), otherwise the one the cursor's step uses.
+	int activeIndex(const Sequence& seq) const {
+		const EditCursor& c = cursors[track];
+		if (leftFocus == FOCUS_INDEX || table == TABLE_REF || c.step < 0)
+			return browseIndex;
+		const Step& s = seq.tracks[track].steps[c.step];
+		return table == TABLE_B ? s.cvB : s.cvA;
+	}
+
+	// The right encoder on VOLTAGE edits that entry of the track's table; while VOLTAGE
+	// is held it changes the granularity instead. Reference tables are not edited entry by
+	// entry (copy a track table onto a user table instead).
+	void editVoltage(Sequence& seq, int d) {
+		Track& t = seq.tracks[track];
+		if (held[FOCUS_VOLTAGE]) {
+			t.voltageGrain = (uint8_t) std::max(0, std::min(t.voltageGrain + d, GRAIN_LEN - 1));
+			return;
+		}
+		if (table == TABLE_REF)
+			return;
+		bool b = table == TABLE_B;
+		VoltageTable& tbl = b ? t.tableB : t.tableA;
+		int i = activeIndex(seq);
+		bool note = b ? t.options.noteDisplayB : t.options.noteDisplayA;
+		tbl.volts[i] = nudgeVoltage(tbl.volts[i], d, t.voltageGrain, note);
+	}
+
+	// INSERT with INDEX focused overwrites the selected table with the copied one. Built-in
+	// reference tables are read-only.
+	void pasteTable(Sequence& seq) {
+		Track& t = seq.tracks[track];
+		if (table == TABLE_REF) {
+			if (!refs->writable(refTable)) {
+				flash("Err");
+				return;
+			}
+			refs->user[refTable - NUM_BUILTIN_TABLES] = clip.table;
+		}
+		else {
+			(table == TABLE_B ? t.tableB : t.tableA) = clip.table;
+		}
+	}
+
 	int copyPosition() const {
 		const EditCursor& c = cursors[track];
 		return leftFocus == FOCUS_PATTERN ? c.pattern : c.step;
@@ -617,6 +712,13 @@ private:
 		int here = copyPosition();
 		if (!copyDragged && clip.kind != Clipboard::NONE) {
 			clip.clear();
+			return;
+		}
+		// With INDEX focused, COPY takes the whole voltage table the TABLE switch shows.
+		if (leftFocus == FOCUS_INDEX) {
+			clip.clear();
+			clip.table = activeTable(seq);
+			clip.kind = Clipboard::TABLE;
 			return;
 		}
 		int from = copyDragged ? std::min(copyAnchor, here) : here;

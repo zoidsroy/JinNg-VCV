@@ -63,8 +63,7 @@ struct IndexedQuadSeq : Module {
 	};
 	enum LightId {
 		ENUMS(FOCUS_LIGHT, FOCUS_LEN),
-		VOLTAGE_FINE_LIGHT,
-		VOLTAGE_COARSE_LIGHT,
+		VOLTAGE_GRAIN_LIGHT,
 		SMOOTH_LIGHT,
 		COPY_LIGHT,
 		LOOP_START_LIGHT,
@@ -141,6 +140,7 @@ struct IndexedQuadSeq : Module {
 		buttonParams[iqs::BUTTON_COMMIT] = COMMIT_PARAM;
 
 		displayDivider.setDivision(512);
+		panel.refs = &gRefTables;
 	}
 
 	void onReset() override {
@@ -250,6 +250,7 @@ struct IndexedQuadSeq : Module {
 				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(panel.focusLed(f)));
 			lights[COPY_LIGHT].setBrightness(panel.copyLed());
 			lights[SMOOTH_LIGHT].setBrightness(panel.smoothLed(seq));
+			lights[VOLTAGE_GRAIN_LIGHT].setBrightness(ledBrightness(panel.grainLed(seq)));
 			lights[LOOP_START_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, true)));
 			lights[LOOP_END_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, false)));
 			lights[PAUSE_LIGHT].setBrightness(transport.paused);
@@ -413,9 +414,11 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		}));
 		addFocus(FOCUS_INDEX, L_BUTTON_X, L_LED_X, ROW_TOP);
 
+		// VOLTAGE has two LEDs: its focus LED above, the editing granularity below (off fine,
+		// on coarse, blinking super coarse).
 		addParam(createParamCentered<GrayButton>(mm2px(Vec(R_BUTTON_X, ROW_TOP)), module, IndexedQuadSeq::FOCUS_PARAM + FOCUS_VOLTAGE));
-		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP - 2.3f)), module, IndexedQuadSeq::VOLTAGE_FINE_LIGHT));
-		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP + 2.3f)), module, IndexedQuadSeq::VOLTAGE_COARSE_LIGHT));
+		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP - 2.3f)), module, IndexedQuadSeq::FOCUS_LIGHT + FOCUS_VOLTAGE));
+		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP + 2.3f)), module, IndexedQuadSeq::VOLTAGE_GRAIN_LIGHT));
 		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", fromView("0.C.00", [](const iqs::PanelView& v) {
 			if (v.message)
 				return std::string(v.message);

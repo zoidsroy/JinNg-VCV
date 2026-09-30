@@ -85,6 +85,9 @@ struct Track {
 	TrackOptions options;
 	VoltageTable tableA;
 	VoltageTable tableB;
+	// Last used voltage editing granularity (fine/coarse/super coarse), kept per track as
+	// the hardware keeps it in snapshots.
+	uint8_t voltageGrain = 0;
 
 	Track() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -106,6 +109,7 @@ struct Track {
 		options = o.options;
 		tableA = o.tableA;
 		tableB = o.tableB;
+		voltageGrain = o.voltageGrain;
 		return *this;
 	}
 
