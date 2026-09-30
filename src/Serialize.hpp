@@ -62,6 +62,10 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		json_object_set_new(trackJ, "tableA", tableToJson(t.tableA));
 		json_object_set_new(trackJ, "tableB", tableToJson(t.tableB));
 		json_object_set_new(trackJ, "voltageGrain", json_integer(t.voltageGrain));
+		json_t* mathJ = json_array();
+		for (const MathOp& op : t.math)
+			json_array_append_new(mathJ, json_pack("[ii]", op.type, op.operand));
+		json_object_set_new(trackJ, "math", mathJ);
 		json_array_append_new(tracksJ, trackJ);
 	}
 	return tracksJ;
@@ -72,8 +76,8 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 	if (!json_is_array(tracksJ))
 		return;
+	seq.clearAll();
 	for (int ti = 0; ti < NUM_TRACKS; ti++) {
-		seq.clearTrack(ti);
 		json_t* trackJ = json_array_get(tracksJ, ti);
 		if (!trackJ)
 			continue;
@@ -82,6 +86,14 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 		tableFromJson(t.tableA, json_object_get(trackJ, "tableA"));
 		tableFromJson(t.tableB, json_object_get(trackJ, "tableB"));
 		t.voltageGrain = (uint8_t) clamp((int) json_integer_value(json_object_get(trackJ, "voltageGrain")), 0, GRAIN_LEN - 1);
+		json_t* mathJ = json_object_get(trackJ, "math");
+		for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(mathJ); k++) {
+			json_t* opJ = json_array_get(mathJ, k);
+			MathOp& op = t.math[k];
+			op.type = (uint8_t) clamp((int) json_integer_value(json_array_get(opJ, 0)), 0, MATH_TYPES - 1);
+			int lo = op.type == MATH_ADD || op.type == MATH_GEO ? -MAX_VALUE : 0;
+			op.operand = (int8_t) clamp((int) json_integer_value(json_array_get(opJ, 1)), lo, MAX_VALUE);
+		}
 
 		json_t* stepsJ = json_object_get(trackJ, "steps");
 		json_t* patternsJ = json_object_get(trackJ, "patterns");

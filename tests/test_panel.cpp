@@ -27,7 +27,7 @@ struct Rig {
 		down(b);
 		up(b);
 	}
-	void left(int d) { panel.turnLeft(seq, d); }
+	void left(int d) { panel.turnLeft(seq, tr, d); }
 	void right(int d) { panel.turnRight(seq, d); }
 
 	const Track& track(int t = 0) const { return seq.tracks[t]; }

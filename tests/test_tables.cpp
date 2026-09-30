@@ -1,4 +1,4 @@
-// Tests for voltage tables: the reference tables, voltage editing granularity, and the
+﻿// Tests for voltage tables: the reference tables, voltage editing granularity, and the
 // panel's INDEX / VOLTAGE / reference-table handling (manual, Voltage Tables).
 
 #include "Panel.hpp"
@@ -30,7 +30,7 @@ struct TableRig {
 		panel.press(seq, tr, b);
 		panel.release(seq, tr, b);
 	}
-	void left(int d) { panel.turnLeft(seq, d); }
+	void left(int d) { panel.turnLeft(seq, tr, d); }
 	void right(int d) { panel.turnRight(seq, d); }
 	PanelView view() const { return panel.view(seq); }
 	std::string message() const {
@@ -151,7 +151,7 @@ TEST(granularity_cycles_and_can_be_dialled_while_held) {
 	r.tap(FOCUS_VOLTAGE);
 	CHECK_EQ(r.view().grain, (int) GRAIN_FINE);
 	// Holding VOLTAGE and turning picks the granularity; the voltage is left alone.
-	r.panel.press(r.seq, r.tr, FOCUS_VOLTAGE); // (a focus press: fine -> coarse)
+	r.panel.press(r.seq, r.tr, FOCUS_VOLTAGE); // held as a modifier: no focus-press cycle
 	r.right(-5);
 	CHECK_EQ(r.view().grain, (int) GRAIN_FINE);
 	r.right(1);

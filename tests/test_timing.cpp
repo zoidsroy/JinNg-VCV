@@ -1,4 +1,4 @@
-// Tests for the time-based features: ratchet, trigger mode, clock division and
+﻿// Tests for the time-based features: ratchet, trigger mode, clock division and
 // multiplication, and smoothing (src/core/Transport.hpp, ClockDivMul.hpp), plus the
 // panel controls that set them (SMOOTH, the track options screen).
 
@@ -325,26 +325,29 @@ TEST(track_options_screen) {
 	Transport tr;
 	Panel p;
 	p.normalizeCursors(seq);
-	p.press(seq, tr, FOCUS_TRACK); // already focused: a focus press opens the screen
+	auto tap = [&](int b) {
+		p.press(seq, tr, b);
+		p.release(seq, tr, b);
+	};
+	tap(FOCUS_TRACK); // already focused: a focus press opens the screen
 	CHECK(p.view(seq).optionsScreen);
-	p.press(seq, tr, FOCUS_DURATION);
+	tap(FOCUS_DURATION);
 	p.turnRight(seq, 2);
 	CHECK_EQ((int) seq.tracks[0].options.clockDiv, 3);
 	p.turnRight(seq, -10);
 	CHECK_EQ((int) seq.tracks[0].options.clockDiv, 1);
-	p.press(seq, tr, FOCUS_STEP);
-	p.turnLeft(seq, 3);
+	tap(FOCUS_STEP);
+	p.turnLeft(seq, tr, 3);
 	CHECK_EQ((int) seq.tracks[0].options.clockMul, 4);
-	p.press(seq, tr, FOCUS_GATE);
+	tap(FOCUS_GATE);
 	CHECK(seq.tracks[0].options.triggerMode);
-	p.press(seq, tr, FOCUS_CV_A);
+	tap(FOCUS_CV_A);
 	CHECK(!seq.tracks[0].options.noteDisplayA);
 	// Editing buttons do nothing here, and the step is untouched.
-	p.press(seq, tr, BUTTON_INSERT);
-	p.release(seq, tr, BUTTON_INSERT);
+	tap(BUTTON_INSERT);
 	CHECK_EQ(seq.tracks[0].numSteps(), 1);
 	CHECK_EQ((int) seq.tracks[0].steps[0].gate, 1);
-	p.press(seq, tr, FOCUS_TRACK); // focus TRACK
-	p.press(seq, tr, FOCUS_TRACK); // focus press: close
+	tap(FOCUS_TRACK); // focus TRACK
+	tap(FOCUS_TRACK); // focus press: close
 	CHECK(!p.view(seq).optionsScreen);
 }

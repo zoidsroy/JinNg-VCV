@@ -1,4 +1,4 @@
-﻿# ER-101 風格 Indexed Quad Sequencer — VCV Rack 模組規格
+# ER-101 風格 Indexed Quad Sequencer — VCV Rack 模組規格
 
 > 依據：Orthogonal Devices《ER-101 User Manual, Firmware v2.09》（2018-08-20）。
 > 本文件是行為規格的整理與改寫，不是手冊的翻譯。標示 **[未定]** 的項目是手冊沒寫清楚、需要實機或社群資料確認的地方。
@@ -232,6 +232,39 @@ Module
   - 方案 2：存在使用者資料夾，所有 patch 共用，比較接近原機「存在快閃記憶體」的感覺。
   - 使用者參考表（8 張）比較適合存在使用者資料夾，所有 patch 共用。
 - **[VCV]** 原機 SAVE 時會卡住約 0.75 秒，這個行為不需要模擬。
+- **[已實作，階段 5]**（`src/core/Engine.hpp`、`Panel.hpp`、`Math.hpp`）：
+  - **架構**：`Engine` 同時持有兩份序列：正在播放的 live，以及 HOLD 模式下編輯用的 shadow 副本。它也負責 transport、面板和 16 個 snapshot。模組本身只做接線。
+  - **Focus press 改成放開時才執行**：在已經 focus 的按鈕上再按一次，所觸發的動作（開關軌道選項、切換 ratchet、切換電壓精度）要等放開時才執行。按住期間如果按了別的鍵，或轉了旋鈕，這個動作就會取消。
+    - 這樣按鈕才能兼當修飾鍵：按住 TRACK 再按 RESET、按住 DURATION 再轉旋鈕、按住 VOLTAGE 再轉旋鈕，都不會誤觸 focus press。
+  - **FOLLOW 模式**：
+    - 顯示跟著播放位置跑；左旋鈕在 PATTERN 或 STEP 上可以拖動播放位置（scrub）。
+    - 沒有 PAUSE 時，INSERT、DELETE、修改 step 參數、切換 ratchet 都會被拒絕，並顯示 `TILt`。
+    - 設定 loop、切換 smooth、編輯電壓表、COPY、MATH 仍然可以用。
+  - **HOLD 模式**：
+    - 進入時把 live 複製成 shadow，之後的所有編輯都作用在 shadow 上。
+    - COMMIT 的時機：
+      - focus 在 TRACK、PATTERN 或 STEP 時，等目前選的那一軌播到下一步、下一個 pattern，或整軌繞回開頭時才寫入。等待期間 COMMIT 燈會閃。
+      - 再按一次 COMMIT，或 focus 在 INDEX、SNAPSHOT 時按，會立即寫入。
+    - 寫入後仍然留在 HOLD。離開 HOLD 時，沒有 COMMIT 的修改會被丟棄。
+    - 寫入後，播放游標沿用原本的 step 位置；若該位置已經不存在，就由 validate 修正。
+  - **量化 reset**：按住 TRACK、PATTERN 或 STEP 再按 RESET 鍵，會等到目前選的軌道到達對應的邊界時才 reset。邊界那一刻本來要開始的 step，會直接換成第 1 步開始發聲。只有 RESET 鍵有這個功能，RESET 輸入沒有。
+  - **MATH**：
+    - 每軌有 4 組運算（CV-A、CV-B、DURATION、GATE），會存進 patch 和 snapshot。
+    - 按住 MATH 會顯示編輯畫面：
+      - 左欄 TRACK、PATTERN、STEP、SNAPSHOT 四行，依序顯示 CV-A、CV-B、DURATION、GATE 的運算代碼。
+      - 按左側 focus 鍵會選取那一行，並切換它的運算；左旋鈕也能切換。
+      - 右旋鈕調整右側已 focus 那個參數的運算元。
+    - 放開 MATH 就套用。套用的範圍依 MATH 畫面之外原本的 focus 決定，也就是 step、pattern 或整軌。
+    - 按住 MATH 時按 VOLTAGE，會把畫面釘住（pin）。釘住後按 MATH 套用，再按 VOLTAGE 離開且不套用。在 MATH 畫面按 DELETE，會把運算歸零。
+    - VOLTAGE 在未釘住時閃爍顯示 `PIN`，釘住後閃爍顯示 `dOnE`。
+    - 運算元的正負號顯示在左邊的代碼上：`-A` 代表減，`-G` 代表除。這樣兩位數的顯示器就能容納 0–99。
+    - 手冊提到的「量化到 N 的倍數」沒有做，因為操作說明裡的運算循環沒有它（第 7 章第 8 題）。
+  - **Snapshot**：
+    - 16 格加上空白的 `--`，存在 patch 裡。SNAPSHOT focus 時，用左旋鈕選格。
+    - LOAD 或 SAVE 按第一次時，VOLTAGE 閃爍顯示 `Abrt`；再按同一個鍵確認，按其他鍵取消，而且那一下不會觸發該鍵本身的動作。
+    - 載入會取代四軌的全部內容（包括電壓表、選項、MATH），並把所有播放游標和編輯游標拉回開頭。在 HOLD 模式下，會載入到 shadow，再用 COMMIT 切入。
+    - `--` 格不能存入。載入它，或載入從未存過的格，都等於全部清空。
+    - 原機存檔時會卡住 0.75 秒，這裡不模擬。
 - 選配功能：匯入、匯出 ER-101 Programmer 的 XML snapshot 格式。需要先取得格式樣本。
 
 ### 4.8 軌道選項畫面
@@ -302,7 +335,7 @@ src/
 5. 除頻與倍頻同時設定時的處理順序。（3.6）→ 目前先除頻、再倍頻。
 6. 刪除 loop 點所在的 step 時，loop 點怎麼處理。（3.8）→ 目前的做法是清除該 loop 點。
 7. 內建參考表 22JT、BLUE、PEnt、E-8、LE-8 的精確數值；12ET 中超過 8.192V 的索引。（2）
-8. 「量化」math 運算是否存在於 v2.09 韌體。（4.6）
+8. 「量化」math 運算是否存在於 v2.09 韌體。（4.6）→ 目前沒有實作。
 9. TRACK 的 focus 按下，到底是顯示總 pulse 數還是進入軌道選項。（4.2）→ 目前做成進入軌道選項；再按一次離開。
 10. ER-102 擴充模組：這份手冊沒有涵蓋。如果要支援，需要另外找 ER-102 的手冊。
 

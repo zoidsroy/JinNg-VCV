@@ -1,9 +1,9 @@
-﻿# ER101-VCV
+# ER101-VCV
 
 一個受 Orthogonal Devices ER-101 啟發的 4 軌 indexed sequencer，做成 VCV Rack 2 模組。
 
 - 行為規格：[docs/SPEC.md](docs/SPEC.md)
-- 目前進度：階段 4 完成（電壓表瀏覽與編輯、參考表、表格複製），下一步是階段 5：MODE（EDIT/FOLLOW/HOLD）、MATH、snapshot
+- 目前進度：階段 5 完成（EDIT/FOLLOW/HOLD 與 COMMIT、MATH、16 個 snapshot、量化 reset），功能面已涵蓋手冊全部章節；下一步是階段 6：面板美術與上架準備
 - 單元測試：在 MINGW64 shell 中執行 `make test`，不需要 Rack
 
 ## Windows 開發環境

@@ -36,12 +36,19 @@ struct Transport {
 		int triggersFired = 0;      // trigger mode: triggers fired in this step
 		float triggerLeft = 0.f;    // trigger mode: time the current trigger stays high
 		int pattern = -1;           // pattern of the playing step (for its smooth flags)
+		int lastStep = -1;          // the previous step started, to spot a wrap-around
 	};
+
+	// Boundaries a track crossed during the last process() call. A step starting is always
+	// EVENT_STEP; it is also EVENT_PATTERN when it is in another pattern, and EVENT_TRACK
+	// (and EVENT_PATTERN) when playback wrapped around, i.e. the track ended.
+	enum Event : uint8_t { EVENT_STEP = 1, EVENT_PATTERN = 2, EVENT_TRACK = 4 };
 
 	int resetMode = RESET_ARMS_FIRST_STEP;
 	bool paused = false;
 	Playhead playheads[NUM_TRACKS];
 	TrackTime times[NUM_TRACKS];
+	uint8_t events[NUM_TRACKS] = {};
 
 	float sinceClock = INFINITY;
 	float sinceReset = INFINITY;
@@ -60,6 +67,8 @@ struct Transport {
 	// One sample. `resetHeld` is the RESET level (input or button); while it stays high
 	// the sequencer is parked and ignores the clock.
 	void process(const Sequence& seq, float dt, bool clockEdge, bool resetEdge, bool resetHeld) {
+		for (uint8_t& e : events)
+			e = 0;
 		if (resetEdge) {
 			// A reset trailing a clock belongs to that clock, so the first step has to
 			// start now or it would sound a whole pulse late.
@@ -153,7 +162,16 @@ private:
 		TrackTime& tt = times[t];
 		tt.sinceStepStart = 0.f;
 		tt.triggersFired = 0;
-		tt.pattern = patternOf(track, playheads[t]);
+		int step = playheads[t].step;
+		int pattern = patternOf(track, playheads[t]);
+		uint8_t e = EVENT_STEP;
+		if (step <= tt.lastStep)
+			e |= EVENT_TRACK | EVENT_PATTERN;
+		else if (pattern != tt.pattern)
+			e |= EVENT_PATTERN;
+		events[t] |= e;
+		tt.lastStep = step;
+		tt.pattern = pattern;
 		const Step* s = playheads[t].current(track);
 		if (track.options.triggerMode && s && !s->ratchet && s->gate > 0) {
 			tt.triggerLeft = s->gate * TRIGGER_UNIT_S;

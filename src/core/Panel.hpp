@@ -1,12 +1,14 @@
-﻿#pragma once
-// Front-panel behaviour (docs/SPEC.md §4): focus, the two encoders, and the edit
-// buttons. It receives press/release/turn events and edits the sequence directly, so
-// it must run on the audio thread, which is the only place the sequence changes.
+#pragma once
+// Front-panel behaviour (docs/SPEC.md §4): focus, the two encoders, and the buttons that
+// edit a sequence. It receives press/release/turn events and edits the sequence it is
+// handed directly, so it must run on the audio thread, which is the only place sequences
+// change.
 //
-// Covers EDIT-mode editing, SMOOTH, the track options screen and voltage tables. The MODE
-// switch, MATH and snapshots come in later stages.
+// The panel edits whatever sequence the host passes in; in HOLD mode that is a shadow
+// copy (see Engine). COMMIT, LOAD/SAVE and RESET are handled by the Engine too.
 
 #include "Editor.hpp"
+#include "Math.hpp"
 #include "Transport.hpp"
 #include "VoltageTables.hpp"
 
@@ -42,6 +44,8 @@ enum Button {
 	BUTTON_COMMIT,
 	BUTTON_LEN
 };
+
+enum Mode { MODE_EDIT, MODE_FOLLOW, MODE_HOLD };
 
 enum InsertMode { INSERT_AFTER, INSERT_SPLIT, INSERT_BEFORE };
 
@@ -82,7 +86,7 @@ struct PanelView {
 	int leftFocus = FOCUS_TRACK;
 	int rightFocus = FOCUS_CV_A;
 	int track = 0;
-	int pattern = -1;      // 0-based, -1 when the track has no patterns
+	int pattern = -1;       // 0-based, -1 when the track has no patterns
 	int stepInPattern = -1; // 0-based, -1 when the cursor has no step
 	Step step;
 	int index = 0;
@@ -92,6 +96,10 @@ struct PanelView {
 	const char* message = nullptr;
 	bool optionsScreen = false;
 	TrackOptions options;
+	bool mathScreen = false;
+	int mathRow = MATH_CV_A;
+	std::array<MathOp, MATH_PARAMS> math;
+	int snapshot = 0; // filled in by the Engine: 0 is the blank snapshot "--"
 };
 
 struct Panel {
@@ -102,15 +110,25 @@ struct Panel {
 	int rightFocus = FOCUS_CV_A;
 	int track = 0;
 	int table = TABLE_A;
+	// Set by the host every sample.
+	int mode = MODE_EDIT;
+	bool paused = false;
+
 	EditCursor cursors[NUM_TRACKS];
 	Clipboard clip;
 
 	bool held[BUTTON_LEN] = {};
+	// A press on an already focused button acts on release, and only if nothing else
+	// happened meanwhile, so the button can also be held as a modifier.
+	bool focusPressPending[FOCUS_LEN] = {};
 	int insertMode = INSERT_AFTER;
 	bool copyDragged = false;
 	int copyAnchor = -1;
 	bool deleteArmed = false;
 	bool optionsScreen = false;
+	bool mathPinned = false;
+	int mathRow = MATH_CV_A;
+	Rng rng;
 	int browseIndex = 0; // the voltage table entry INDEX points at
 	int refTable = 0;    // the reference table picked while TABLE is on REF
 	RefTables ownRefs;
@@ -124,6 +142,7 @@ struct Panel {
 	void press(Sequence& seq, Transport& tr, int b) {
 		if (b < 0 || b >= BUTTON_LEN)
 			return;
+		markChord();
 		held[b] = true;
 
 		// Clearing a track asks for a second DELETE; any other button aborts.
@@ -135,6 +154,15 @@ struct Panel {
 			return;
 		}
 
+		if (b == BUTTON_MATH) {
+			if (mathPinned)
+				applyMathToFocus(seq);
+			return;
+		}
+		if (mathScreen()) {
+			pressInMathScreen(seq, b);
+			return;
+		}
 		if (b < FOCUS_LEN) {
 			pressFocus(seq, b);
 			return;
@@ -142,6 +170,10 @@ struct Panel {
 		// The track options screen only takes focus buttons and the encoders.
 		if (optionsScreen)
 			return;
+		if ((b == BUTTON_INSERT || b == BUTTON_DELETE) && refuseEdit()) {
+			held[b] = false;
+			return;
+		}
 		switch (b) {
 			case BUTTON_INSERT:
 				insertMode = INSERT_AFTER;
@@ -171,7 +203,20 @@ struct Panel {
 		if (b < 0 || b >= BUTTON_LEN || !held[b])
 			return;
 		held[b] = false;
-		if (optionsScreen)
+		if (b < FOCUS_LEN) {
+			if (focusPressPending[b]) {
+				focusPressPending[b] = false;
+				focusPress(seq, b);
+			}
+			return;
+		}
+		if (b == BUTTON_MATH) {
+			// Releasing MATH applies the transform, unless its edit screen is pinned.
+			if (!mathPinned)
+				applyMathToFocus(seq);
+			return;
+		}
+		if (optionsScreen || mathScreen())
 			return;
 		switch (b) {
 			case BUTTON_INSERT:
@@ -185,9 +230,14 @@ struct Panel {
 		}
 	}
 
-	void turnLeft(Sequence& seq, int d) {
+	void turnLeft(Sequence& seq, Transport& tr, int d) {
 		if (d == 0)
 			return;
+		markChord();
+		if (mathScreen()) {
+			cycleMathType(seq.tracks[track].math[mathRow], d);
+			return;
+		}
 		if (optionsScreen && leftFocus == FOCUS_STEP) {
 			TrackOptions& o = seq.tracks[track].options;
 			o.clockMul = adjustRatio(o.clockMul, d);
@@ -196,12 +246,16 @@ struct Panel {
 		switch (leftFocus) {
 			case FOCUS_TRACK:
 				track = std::max(0, std::min(track + d, NUM_TRACKS - 1));
+				if (mode == MODE_FOLLOW)
+					follow(seq, tr);
 				break;
 			case FOCUS_PATTERN:
 				movePattern(seq, d);
+				scrub(tr);
 				break;
 			case FOCUS_STEP:
 				moveStep(seq, d);
+				scrub(tr);
 				break;
 			case FOCUS_INDEX:
 				browseIndex = std::max(0, std::min(browseIndex + d, TABLE_SIZE - 1));
@@ -216,6 +270,7 @@ struct Panel {
 	void turnRight(Sequence& seq, int d) {
 		if (d == 0)
 			return;
+		markChord();
 		// Holding INSERT picks where the insertion goes: turning counter-clockwise walks
 		// AFtr -> SPLt -> bEFr.
 		if (held[BUTTON_INSERT]) {
@@ -223,6 +278,12 @@ struct Panel {
 			return;
 		}
 		Track& t = seq.tracks[track];
+		if (mathScreen()) {
+			int param = rightFocus - FOCUS_CV_A;
+			if (param >= 0 && param < MATH_PARAMS)
+				adjustMathOperand(t.math[param], d);
+			return;
+		}
 		if (optionsScreen) {
 			editOption(t.options, rightFocus, d);
 			return;
@@ -239,7 +300,7 @@ struct Panel {
 			return;
 		}
 		int pos = cursor().step;
-		if (pos < 0)
+		if (pos < 0 || refuseEdit())
 			return;
 		if (rightFocus == FOCUS_DURATION && held[FOCUS_DURATION]) {
 			edit::transferDuration(t, pos, d);
@@ -255,6 +316,15 @@ struct Panel {
 		}
 	}
 
+	// A held focus button was used as a modifier (another button or an encoder moved
+	// while it was down), so its focus-press action is cancelled.
+	void markChord() {
+		for (int f = 0; f < FOCUS_LEN; f++) {
+			if (held[f])
+				focusPressPending[f] = false;
+		}
+	}
+
 	void tick(float dt) {
 		time += dt;
 		if (message) {
@@ -264,10 +334,42 @@ struct Panel {
 		}
 	}
 
+	// FOLLOW mode: the cursor of the selected track tracks its play cursor.
+	void follow(const Sequence& seq, const Transport& tr) {
+		const Track& t = seq.tracks[track];
+		const Playhead& ph = tr.playheads[track];
+		EditCursor& c = cursor();
+		if (ph.step < t.numSteps() && t.numSteps() > 0) {
+			if (c.step != ph.step)
+				setCursorStep(t, ph.step);
+		}
+		else {
+			normalize(t, c);
+		}
+	}
+
 	// Call after the sequence was replaced wholesale (patch load, demo, clear).
 	void normalizeCursors(const Sequence& seq) {
 		for (int t = 0; t < NUM_TRACKS; t++)
 			normalize(seq.tracks[t], cursors[t]);
+	}
+
+	// Moves every cursor back to the first step (loading a snapshot does this).
+	void rewindCursors(const Sequence& seq) {
+		for (int t = 0; t < NUM_TRACKS; t++) {
+			cursors[t] = EditCursor();
+			cursors[t].pattern = 0;
+			normalize(seq.tracks[t], cursors[t]);
+		}
+	}
+
+	void flash(const char* msg) {
+		message = msg;
+		messageTime = MESSAGE_S;
+	}
+
+	bool mathScreen() const {
+		return held[BUTTON_MATH] || mathPinned;
 	}
 
 	// --- Output --------------------------------------------------------------
@@ -283,6 +385,8 @@ struct Panel {
 		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK) ||
 		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX))
 			return LED_BLINK;
+		if (mathScreen() && f < NUM_LEFT_FOCUS)
+			return f == FOCUS_TRACK + mathRow ? LED_ON : LED_OFF;
 		return (f == leftFocus || f == rightFocus) ? LED_ON : LED_OFF;
 	}
 
@@ -338,7 +442,7 @@ struct Panel {
 		const Track& t = seq.tracks[track];
 		const EditCursor& c = cursors[track];
 		v.pattern = c.pattern;
-		if (c.step >= 0) {
+		if (c.step >= 0 && c.step < t.numSteps()) {
 			v.step = t.steps[c.step];
 			v.stepInPattern = c.step - edit::patternStart(t, c.pattern);
 		}
@@ -349,10 +453,19 @@ struct Panel {
 		v.message = currentMessage();
 		v.optionsScreen = optionsScreen;
 		v.options = t.options;
+		v.mathScreen = mathScreen();
+		v.mathRow = mathRow;
+		v.math = t.math;
 		return v;
 	}
 
 	const char* currentMessage() const {
+		if (mathScreen()) {
+			// "PIN" invites pinning the edit screen; once pinned, "dOnE" says how to leave.
+			if (!blinkPhase())
+				return "";
+			return mathPinned ? "dOnE" : "PIN";
+		}
 		if (held[BUTTON_INSERT] && (leftFocus == FOCUS_STEP || leftFocus == FOCUS_PATTERN)) {
 			static const char* const words[3] = {"AFtr", "SPLt", "bEFr"};
 			return words[insertMode];
@@ -371,9 +484,13 @@ private:
 		return (uint8_t) std::max(0, std::min((int) v + d, MAX_VALUE));
 	}
 
-	void flash(const char* msg) {
-		message = msg;
-		messageTime = MESSAGE_S;
+	// In FOLLOW mode the sequence can only be changed while paused; otherwise the edit is
+	// refused with "TILt" (manual, The Modes).
+	bool refuseEdit() {
+		if (mode != MODE_FOLLOW || paused)
+			return false;
+		flash("TILt");
+		return true;
 	}
 
 	static void normalize(const Track& t, EditCursor& c) {
@@ -399,39 +516,51 @@ private:
 		c.step = pos;
 	}
 
+	// FOLLOW mode: moving the cursor moves the play cursor with it.
+	void scrub(Transport& tr) {
+		if (mode != MODE_FOLLOW || cursor().step < 0)
+			return;
+		Playhead& ph = tr.playheads[track];
+		ph.step = cursor().step;
+		ph.pulse = 0;
+	}
+
 	void pressFocus(Sequence& seq, int f) {
 		int& focus = f < NUM_LEFT_FOCUS ? leftFocus : rightFocus;
-		bool focusPress = focus == f;
-		focus = f;
+		if (focus == f) {
+			focusPressPending[f] = true;
+		}
+		else {
+			focus = f;
+			// Focusing INDEX starts browsing at the entry the cursor's step uses.
+			if (f == FOCUS_INDEX && table != TABLE_REF && cursor().step >= 0) {
+				const Step& s = seq.tracks[track].steps[cursor().step];
+				browseIndex = table == TABLE_B ? s.cvB : s.cvA;
+			}
+		}
+		// On the options screen the buttons beside the two-state options cycle them.
+		if (optionsScreen && (f == FOCUS_CV_A || f == FOCUS_CV_B || f == FOCUS_GATE))
+			editOption(seq.tracks[track].options, f, 1);
+	}
 
-		// A focus press on TRACK opens and closes the track options screen.
-		if (focusPress && f == FOCUS_TRACK) {
+	// The action of pressing an already focused button, run on its release.
+	void focusPress(Sequence& seq, int f) {
+		// TRACK opens and closes the track options screen.
+		if (f == FOCUS_TRACK) {
 			optionsScreen = !optionsScreen;
 			return;
 		}
-		if (optionsScreen) {
-			// On the options screen the buttons beside the two-state options cycle them.
-			if (f == FOCUS_CV_A || f == FOCUS_CV_B || f == FOCUS_GATE)
-				editOption(seq.tracks[track].options, f, 1);
+		if (optionsScreen)
 			return;
-		}
-
-		// Focusing INDEX starts browsing at the entry the cursor's step uses.
-		if (!focusPress && f == FOCUS_INDEX && table != TABLE_REF && cursor().step >= 0) {
-			const Step& s = seq.tracks[track].steps[cursor().step];
-			browseIndex = table == TABLE_B ? s.cvB : s.cvA;
-		}
-
-		if (!focusPress)
-			return;
-		// A focus press on VOLTAGE cycles fine -> coarse -> super coarse.
+		// VOLTAGE cycles fine -> coarse -> super coarse.
 		if (f == FOCUS_VOLTAGE) {
 			uint8_t& g = seq.tracks[track].voltageGrain;
 			g = (uint8_t) ((g + 1) % GRAIN_LEN);
 		}
+		// GATE toggles ratchet on the cursor's step.
 		if (f == FOCUS_GATE) {
 			int pos = cursor().step;
-			if (pos >= 0) {
+			if (pos >= 0 && !refuseEdit()) {
 				Step& s = seq.tracks[track].steps[pos];
 				s.ratchet = !s.ratchet;
 			}
@@ -505,6 +634,44 @@ private:
 		int first = edit::patternStart(t, c.pattern);
 		int end = edit::patternEnd(t, c.pattern);
 		c.step = first == end ? -1 : (d > 0 ? first : end - 1);
+	}
+
+	// --- MATH ------------------------------------------------------------------
+
+	// While MATH is held (or its screen pinned) the left displays show each parameter's
+	// operation and the right ones its operand. Left focus buttons pick a parameter's row
+	// and cycle its operation; the right encoder sets the focused parameter's operand.
+	void pressInMathScreen(Sequence& seq, int b) {
+		Track& t = seq.tracks[track];
+		if (b == FOCUS_VOLTAGE) {
+			// VOLTAGE pins the edit screen so MATH can be let go; pressed again it leaves
+			// without applying.
+			mathPinned = !mathPinned;
+			return;
+		}
+		if (b == BUTTON_DELETE) {
+			t.math = std::array<MathOp, MATH_PARAMS>();
+			return;
+		}
+		if (b >= FOCUS_TRACK && b <= FOCUS_SNAPSHOT) {
+			mathRow = b - FOCUS_TRACK;
+			cycleMathType(t.math[mathRow], 1);
+			return;
+		}
+		if (b >= FOCUS_CV_A && b <= FOCUS_GATE)
+			rightFocus = b;
+	}
+
+	// Transforms the focused step, pattern or whole track.
+	void applyMathToFocus(Sequence& seq) {
+		Track& t = seq.tracks[track];
+		const EditCursor& c = cursor();
+		if (leftFocus == FOCUS_TRACK)
+			applyMath(t, 0, t.numSteps() - 1, rng);
+		else if (leftFocus == FOCUS_PATTERN && c.pattern >= 0)
+			applyMath(t, edit::patternStart(t, c.pattern), edit::patternEnd(t, c.pattern) - 1, rng);
+		else if (c.step >= 0)
+			applyMath(t, c.step, c.step, rng);
 	}
 
 	// --- INSERT ----------------------------------------------------------------
@@ -645,10 +812,7 @@ private:
 		}
 	}
 
-	// --- COPY ------------------------------------------------------------------
-
-	// The cursor position a copy range is measured in: a step, or a pattern.
-	// --- Voltage tables ----------------------------------------------------------
+	// --- Voltage tables --------------------------------------------------------
 
 	// The table the TABLE switch selects: the track's A or B, or the chosen reference.
 	const VoltageTable& activeTable(const Sequence& seq) const {
@@ -662,9 +826,10 @@ private:
 	// for reference tables), otherwise the one the cursor's step uses.
 	int activeIndex(const Sequence& seq) const {
 		const EditCursor& c = cursors[track];
-		if (leftFocus == FOCUS_INDEX || table == TABLE_REF || c.step < 0)
+		const Track& t = seq.tracks[track];
+		if (leftFocus == FOCUS_INDEX || table == TABLE_REF || c.step < 0 || c.step >= t.numSteps())
 			return browseIndex;
-		const Step& s = seq.tracks[track].steps[c.step];
+		const Step& s = t.steps[c.step];
 		return table == TABLE_B ? s.cvB : s.cvA;
 	}
 
@@ -702,6 +867,9 @@ private:
 		}
 	}
 
+	// --- COPY ------------------------------------------------------------------
+
+	// The cursor position a copy range is measured in: a step, or a pattern.
 	int copyPosition() const {
 		const EditCursor& c = cursors[track];
 		return leftFocus == FOCUS_PATTERN ? c.pattern : c.step;

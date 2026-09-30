@@ -48,6 +48,19 @@ struct TrackOptions {
 	bool triggerMode = false; // GATE outputs triggers (tr) rather than gates (Gt)
 };
 
+// A MATH operation for one step parameter (manual, Math Operations). The type codes on
+// the display are A (add), G (geometric: multiply, or divide for a negative operand),
+// S (set), rd (random 0..N) and Jt (jitter by -N..N).
+enum MathType { MATH_ADD, MATH_GEO, MATH_SET, MATH_RANDOM, MATH_JITTER, MATH_TYPES };
+
+struct MathOp {
+	uint8_t type = MATH_ADD;
+	int8_t operand = 0; // -99..99 for add/geometric, 0..99 otherwise
+};
+
+// The parameters a MathOp applies to, in display order.
+enum MathParam { MATH_CV_A, MATH_CV_B, MATH_DURATION, MATH_GATE, MATH_PARAMS };
+
 struct VoltageTable {
 	std::array<float, TABLE_SIZE> volts;
 
@@ -88,6 +101,8 @@ struct Track {
 	// Last used voltage editing granularity (fine/coarse/super coarse), kept per track as
 	// the hardware keeps it in snapshots.
 	uint8_t voltageGrain = 0;
+	// The track's prepared MATH transform, one operation per step parameter.
+	std::array<MathOp, MATH_PARAMS> math;
 
 	Track() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -110,6 +125,7 @@ struct Track {
 		tableA = o.tableA;
 		tableB = o.tableB;
 		voltageGrain = o.voltageGrain;
+		math = o.math;
 		return *this;
 	}
 
@@ -182,6 +198,20 @@ struct Sequence {
 		t.loopEnd = -1;
 		t.smoothA = false;
 		t.smoothB = false;
+	}
+
+	// Back to a fresh state: no steps, default tables, options and math. Unlike
+	// assigning a new Sequence this does not allocate.
+	void clearAll() {
+		for (int i = 0; i < NUM_TRACKS; i++) {
+			clearTrack(i);
+			Track& t = tracks[i];
+			t.options = TrackOptions();
+			t.tableA = VoltageTable();
+			t.tableB = VoltageTable();
+			t.voltageGrain = 0;
+			t.math = std::array<MathOp, MATH_PARAMS>();
+		}
 	}
 };
 
