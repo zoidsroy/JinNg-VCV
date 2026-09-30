@@ -1,13 +1,17 @@
 ﻿#include "plugin.hpp"
+#include "Serialize.hpp"
+#include "core/NoteFormat.hpp"
+#include "core/Playhead.hpp"
+#include "core/Sequence.hpp"
+#include "core/Transport.hpp"
 #include "ui/Components.hpp"
 #include <atomic>
 
-// Panel skeleton: every control of the hardware is placed and wired to a param/light,
-// focus buttons and the encoders already drive the focus LEDs and the TRACK display.
-// The sequencer engine lands in stage 1 (see docs/SPEC.md); until then every track's
-// GATE mirrors the clock so the jacks can be sanity-checked.
+// Stage 1: the playback engine (src/core) drives the outputs. There is no editor yet,
+// so sequences come from the context menu's demo or from a saved patch. The displays
+// follow the play cursor of the selected track.
 
-static constexpr int NUM_TRACKS = 4;
+using iqs::NUM_TRACKS;
 
 // Focus targets. The first five are steered by the left encoder, the rest by the right.
 enum Focus {
@@ -77,17 +81,38 @@ struct IndexedQuadSeq : Module {
 	enum TablePos { TABLE_B, TABLE_REF, TABLE_A };
 	enum ModePos { MODE_FOLLOW, MODE_EDIT, MODE_HOLD };
 
+	// Values the displays show, published by the engine for the UI thread.
+	struct DisplayState {
+		bool hasSteps = false;
+		int pattern = 0;
+		int step = 0;
+		int cvA = 0;
+		int cvB = 0;
+		int duration = 0;
+		int gate = 0;
+		float voltage = 0.f;
+	};
+
+	iqs::Sequence seq;
+	iqs::Transport transport;
+
 	dsp::BooleanTrigger focusTriggers[FOCUS_LEN];
 	dsp::BooleanTrigger pauseTrigger;
+	dsp::BooleanTrigger resetButtonTrigger;
+	dsp::SchmittTrigger clockTrigger;
+	dsp::SchmittTrigger resetTrigger;
+	dsp::ClockDivider displayDivider;
 
-	// Written by the UI thread (encoder widgets), drained by process().
+	// Written by the UI thread (encoder widgets, context menu), drained by process().
 	std::atomic<int> leftTurns{0};
 	std::atomic<int> rightTurns{0};
+	std::atomic<bool> loadDemoRequested{false};
+	std::atomic<bool> clearRequested{false};
 
 	int leftFocus = FOCUS_TRACK;
 	int rightFocus = FOCUS_CV_A;
 	int selectedTrack = 0;
-	bool paused = false;
+	DisplayState display;
 
 	IndexedQuadSeq() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -114,16 +139,83 @@ struct IndexedQuadSeq : Module {
 			configOutput(CV_B_OUTPUT + t, string::f("Track %d CV-B", t + 1));
 			configOutput(GATE_OUTPUT + t, string::f("Track %d gate", t + 1));
 		}
+		displayDivider.setDivision(512);
 	}
 
 	void onReset() override {
 		leftFocus = FOCUS_TRACK;
 		rightFocus = FOCUS_CV_A;
 		selectedTrack = 0;
-		paused = false;
+		transport.paused = false;
+		for (int t = 0; t < NUM_TRACKS; t++)
+			seq.clearTrack(t);
+		rewind(false);
+	}
+
+	void rewind(bool immediate) {
+		transport.rewind(seq, immediate);
+	}
+
+	// A short four-track example so stage 1 can be heard before the editor exists.
+	void loadDemo() {
+		for (int t = 0; t < NUM_TRACKS; t++)
+			seq.clearTrack(t);
+		auto step = [](int cvA, int cvB, int duration, int gate) {
+			iqs::Step s;
+			s.cvA = (uint8_t) cvA;
+			s.cvB = (uint8_t) cvB;
+			s.duration = (uint8_t) duration;
+			s.gate = (uint8_t) gate;
+			return s;
+		};
+		// Track 1: C major then F major arpeggio, one pattern each, 4 pulses per note.
+		const int arpC[4] = {24, 28, 31, 36};
+		const int arpF[4] = {29, 33, 36, 41};
+		for (int i = 0; i < 4; i++)
+			seq.appendStep(0, step(arpC[i], 60 - i * 10, 4, 2));
+		seq.appendPattern(0);
+		for (int i = 0; i < 4; i++)
+			seq.appendStep(0, step(arpF[i], 60 - i * 10, 4, 2));
+		// Track 2: bass, legato half notes.
+		seq.appendStep(1, step(12, 48, 16, 16));
+		seq.appendStep(1, step(17, 48, 16, 16));
+		// Track 3: syncopated rhythm, with a zero-length step that is skipped.
+		seq.appendStep(2, step(36, 96, 3, 1));
+		seq.appendStep(2, step(36, 40, 3, 1));
+		seq.appendStep(2, step(99, 99, 0, 5));
+		seq.appendStep(2, step(36, 70, 2, 1));
+		// Track 4: loops steps 2-3 after playing step 1 once.
+		seq.appendStep(3, step(48, 24, 8, 1));
+		seq.appendStep(3, step(43, 24, 4, 2));
+		seq.appendStep(3, step(45, 24, 4, 2));
+		seq.tracks[3].loopStart = 1;
+		seq.tracks[3].loopEnd = 2;
+		rewind(false);
+	}
+
+	void publishDisplay() {
+		const iqs::Track& t = seq.tracks[selectedTrack];
+		const iqs::Playhead& ph = transport.playheads[selectedTrack];
+		DisplayState d;
+		const iqs::Step* s = ph.current(t);
+		if (s) {
+			d.hasSteps = true;
+			t.locate(ph.step, d.pattern, d.step);
+			d.cvA = s->cvA;
+			d.cvB = s->cvB;
+			d.duration = s->duration;
+			d.gate = s->gate;
+			d.voltage = t.tableA[s->cvA];
+		}
+		display = d;
 	}
 
 	void process(const ProcessArgs& args) override {
+		if (clearRequested.exchange(false))
+			onReset();
+		if (loadDemoRequested.exchange(false))
+			loadDemo();
+
 		for (int f = 0; f < FOCUS_LEN; f++) {
 			if (focusTriggers[f].process(params[FOCUS_PARAM + f].getValue() > 0.f)) {
 				if (f < NUM_LEFT_FOCUS)
@@ -139,23 +231,37 @@ struct IndexedQuadSeq : Module {
 		rightTurns.exchange(0);
 
 		if (pauseTrigger.process(params[PAUSE_PARAM].getValue() > 0.f))
-			paused = !paused;
+			transport.paused = !transport.paused;
 
 		for (int f = 0; f < FOCUS_LEN; f++)
 			lights[FOCUS_LIGHT + f].setBrightness(f == leftFocus || f == rightFocus);
-		lights[PAUSE_LIGHT].setBrightness(paused);
+		lights[PAUSE_LIGHT].setBrightness(transport.paused);
 
-		bool clockHigh = !paused && inputs[CLOCK_INPUT].getVoltage() >= 2.5f;
+		// RESET (input or button). While it is held high the sequencer stays parked.
+		bool resetButton = params[RESET_PARAM].getValue() > 0.f;
+		bool resetEdge = resetTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 2.f);
+		resetEdge |= resetButtonTrigger.process(resetButton);
+		bool resetHeld = resetTrigger.isHigh() || resetButton;
+		bool clockEdge = clockTrigger.process(inputs[CLOCK_INPUT].getVoltage(), 0.1f, 2.f);
+		transport.process(seq, args.sampleTime, clockEdge, resetEdge, resetHeld);
+
 		for (int t = 0; t < NUM_TRACKS; t++) {
-			outputs[CV_A_OUTPUT + t].setVoltage(0.f);
-			outputs[CV_B_OUTPUT + t].setVoltage(0.f);
-			outputs[GATE_OUTPUT + t].setVoltage(clockHigh ? 10.f : 0.f);
+			const iqs::Track& track = seq.tracks[t];
+			const iqs::Playhead& ph = transport.playheads[t];
+			outputs[CV_A_OUTPUT + t].setVoltage(ph.cvA(track));
+			outputs[CV_B_OUTPUT + t].setVoltage(ph.cvB(track));
+			outputs[GATE_OUTPUT + t].setVoltage(transport.gate(seq, t) ? 10.f : 0.f);
 		}
+
+		if (displayDivider.process())
+			publishDisplay();
 	}
 
 	json_t* dataToJson() override {
 		json_t* rootJ = json_object();
-		json_object_set_new(rootJ, "paused", json_boolean(paused));
+		json_object_set_new(rootJ, "sequence", iqs::sequenceToJson(seq));
+		json_object_set_new(rootJ, "resetMode", json_integer(transport.resetMode));
+		json_object_set_new(rootJ, "paused", json_boolean(transport.paused));
 		json_object_set_new(rootJ, "leftFocus", json_integer(leftFocus));
 		json_object_set_new(rootJ, "rightFocus", json_integer(rightFocus));
 		json_object_set_new(rootJ, "selectedTrack", json_integer(selectedTrack));
@@ -163,8 +269,12 @@ struct IndexedQuadSeq : Module {
 	}
 
 	void dataFromJson(json_t* rootJ) override {
+		iqs::sequenceFromJson(seq, json_object_get(rootJ, "sequence"));
+		rewind(false);
+		if (json_t* j = json_object_get(rootJ, "resetMode"))
+			transport.resetMode = clamp((int) json_integer_value(j), 0, (int) iqs::RESET_STARTS_FIRST_STEP);
 		if (json_t* j = json_object_get(rootJ, "paused"))
-			paused = json_boolean_value(j);
+			transport.paused = json_boolean_value(j);
 		if (json_t* j = json_object_get(rootJ, "leftFocus"))
 			leftFocus = clamp((int) json_integer_value(j), 0, NUM_LEFT_FOCUS - 1);
 		if (json_t* j = json_object_get(rootJ, "rightFocus"))
@@ -227,6 +337,32 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		return d;
 	}
 
+	// Text for a display that shows a field of the playing step, or `empty` when the
+	// selected track has no steps (or in the module browser).
+	std::function<std::string()> showWhenPlaying(std::string empty,
+	                                             std::function<std::string(const IndexedQuadSeq::DisplayState&)> field) {
+		IndexedQuadSeq* m = seq;
+		return [m, empty, field]() {
+			if (!m)
+				return empty;
+			IndexedQuadSeq::DisplayState d = m->display;
+			return d.hasSteps ? field(d) : empty;
+		};
+	}
+
+	void appendContextMenu(Menu* menu) override {
+		IndexedQuadSeq* m = seq;
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createIndexSubmenuItem("Reset behaviour",
+			{"Next clock plays the first step", "First step sounds at the reset"},
+			[m]() { return m->transport.resetMode; },
+			[m](int mode) { m->transport.resetMode = mode; }));
+		menu->addChild(new MenuSeparator);
+		menu->addChild(createMenuLabel("Stage 1 testing"));
+		menu->addChild(createMenuItem("Load demo sequence", "", [m]() { m->loadDemoRequested = true; }));
+		menu->addChild(createMenuItem("Clear all tracks", "", [m]() { m->clearRequested = true; }));
+	}
+
 	void addFocus(int focus, float buttonX, float ledX, float y) {
 		addParam(createParamCentered<GrayButton>(mm2px(Vec(buttonX, y)), seq, IndexedQuadSeq::FOCUS_PARAM + focus));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(ledX, y)), seq, IndexedQuadSeq::FOCUS_LIGHT + focus));
@@ -260,13 +396,18 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addParam(createParamCentered<BlueButton>(mm2px(Vec(FN_COL_2, ROW_TOP)), module, IndexedQuadSeq::SMOOTH_PARAM));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(37.2f, ROW_TOP)), module, IndexedQuadSeq::SMOOTH_LIGHT));
 
-		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0");
+		// Stage 1: INDEX/VOLTAGE show the playing step's CV-A table entry.
+		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0", showWhenPlaying("0", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.cvA);
+		}));
 		addFocus(FOCUS_INDEX, L_BUTTON_X, L_LED_X, ROW_TOP);
 
 		addParam(createParamCentered<GrayButton>(mm2px(Vec(R_BUTTON_X, ROW_TOP)), module, IndexedQuadSeq::FOCUS_PARAM + FOCUS_VOLTAGE));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP - 2.3f)), module, IndexedQuadSeq::VOLTAGE_FINE_LIGHT));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP + 2.3f)), module, IndexedQuadSeq::VOLTAGE_COARSE_LIGHT));
-		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00");
+		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", showWhenPlaying("0.C.00", [](const IndexedQuadSeq::DisplayState& d) {
+			return iqs::formatNote(d.voltage);
+		}));
 
 		// --- Display grid.
 		const int leftFocus[4] = {FOCUS_TRACK, FOCUS_PATTERN, FOCUS_STEP, FOCUS_SNAPSHOT};
@@ -274,14 +415,30 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		for (int r = 0; r < 4; r++) {
 			addFocus(leftFocus[r], L_BUTTON_X, L_LED_X, ROWS[r]);
 			addFocus(rightFocus[r], R_BUTTON_X, R_LED_X, ROWS[r]);
-			addDisplay(R_DISPLAY_X, ROWS[r], DISPLAY_W, 2, "--");
 		}
 		addDisplay(L_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "1", [module]() {
 			return module ? std::to_string(module->selectedTrack + 1) : std::string("1");
 		});
-		addDisplay(L_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--");
-		addDisplay(L_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--");
+		// Patterns and steps count from 1, as in the manual.
+		addDisplay(L_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.pattern + 1);
+		}));
+		addDisplay(L_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.step + 1);
+		}));
 		addDisplay(L_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "1");
+		addDisplay(R_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.cvA);
+		}));
+		addDisplay(R_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.cvB);
+		}));
+		addDisplay(R_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.duration);
+		}));
+		addDisplay(R_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
+			return std::to_string(d.gate);
+		}));
 
 		// --- Encoders.
 		addEncoder(Vec(27.2f, 39.5f), &IndexedQuadSeq::leftTurns);

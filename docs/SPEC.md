@@ -1,4 +1,4 @@
-# ER-101 風格 Indexed Quad Sequencer — VCV Rack 模組規格
+﻿# ER-101 風格 Indexed Quad Sequencer — VCV Rack 模組規格
 
 > 依據：Orthogonal Devices《ER-101 User Manual, Firmware v2.09》（2018-08-20）。
 > 本文件是行為規格的整理與改寫，不是手冊的翻譯。標示 **[未定]** 的項目是手冊沒寫清楚、需要實機或社群資料確認的地方。
@@ -108,7 +108,14 @@ Module
 - RESET 輸入的上升沿（或按下 RESET 按鈕），會讓四軌都回到第 1 個 pattern 的第 1 個 step，不管 loop 設定。
 - **RESET 保持高電位時，音序器停在第一個 step 並忽略 clock**，直到 RESET 變低。
 - 量化 reset：按住 TRACK／PATTERN／STEP 的 focus 按鈕再按 RESET，reset 會等到目前（被 focus 的那一軌）的 track、pattern 或 step 結束時才發生。
-- **[未定]** reset 之後的第一個 clock，是播放第一個 step，還是前進到第二個 step？這決定是否需要「reset 後的 clock 不前進」的處理。**[VCV]** 另外要處理 Rack 常見的狀況：reset 和 clock 在同一個 sample 到達。慣例是 reset 後約 1ms 內忽略 clock。
+- **[未定]** reset 之後的第一個 clock，是播放第一個 step，還是前進到第二個 step？
+- **[已實作]** 做成右鍵選單「Reset behaviour」的選項，實作在 `src/core/Transport.hpp`：
+  - 預設「Next clock plays the first step」：reset 後停在第一步待命（armed），下一個 clock 才開始第一步。
+  - 「First step sounds at the reset」：reset 當下第一步就開始，下一個 clock 算第一步的第 2 個 pulse。
+  - 間隔 1ms 以內的 clock 和 reset 視為同一個事件：
+    - 同一個 sample 到達，或 clock 落在 reset 脈衝的前 1ms 內：這個 clock 就是 reset 的那一拍，會啟動第一步。在第二種模式下，第一步已經開始了，所以這個 clock 會被吃掉，不會重複計算。
+    - reset 比 clock 晚 1ms 以內到達（Rack 每經過一條線都會延遲一個 sample）：reset 當下就讓第一步開始，否則第一步會晚一整個 pulse。
+  - reset 持續高電位超過 1ms 之後，後續的 clock 都會被忽略。
 
 ### 3.8 Loop
 - 每軌各自有 loop start 和 loop end，各自可以不設定：
@@ -262,7 +269,7 @@ src/
 
 ## 7. 待確認問題彙整
 
-1. reset 之後的第一個 clock，是播放 step 1 還是前進到 step 2？（3.7）
+1. reset 之後的第一個 clock，是播放 step 1 還是前進到 step 2？（3.7）→ 目前做成選項，預設為播放 step 1。
 2. smooth 的「下一個 step」怎麼認定：duration=0 的 step 算不算、loop 回頭時怎麼算？（3.5）
 3. 連續 legato step 之間 gate 是否會中斷？（3.2）
 4. Trigger 模式加 ratchet 時，多次觸發的時間分布方式。（3.3）
