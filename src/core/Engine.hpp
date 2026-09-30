@@ -1,22 +1,22 @@
-﻿#pragma once
+#pragma once
 // The whole sequencer: sequence, transport and panel, plus what spans them (spec §4.3,
 // §4.7, §3.7):
 //  - the MODE switch. EDIT edits the playing sequence; FOLLOW shows (and scrubs) the play
 //    cursor; HOLD edits a shadow copy that COMMIT writes back, either immediately or
 //    quantized to the end of the current step / pattern / track.
-//  - 16 snapshots plus the blank one ("--"), with LOAD/SAVE asking for confirmation.
+//  - snapshots (16, or 127 slots with the expander; see Snapshots.hpp), with LOAD/SAVE
+//    asking for confirmation.
 //  - RESET quantized to the end of the current step / pattern / track by holding that
 //    focus button.
 // Plain C++ with no Rack dependency; the module feeds it edges and reads outputs back.
 
 #include "Panel.hpp"
 #include "Recorder.hpp"
+#include "Snapshots.hpp"
 #include "Transport.hpp"
 #include <array>
 
 namespace iqs {
-
-static constexpr int NUM_SNAPSHOTS = 16;
 
 struct Engine {
 	enum Quantize { Q_NONE, Q_STEP, Q_PATTERN, Q_TRACK };
@@ -30,9 +30,8 @@ struct Engine {
 	Transport shadowTr; // play cursors the shadow's edits shift; never clocked
 	Panel panel;
 
-	std::array<Sequence, NUM_SNAPSHOTS> snapshots;
-	std::array<bool, NUM_SNAPSHOTS> snapshotUsed = {};
-	int snapshotSlot = 1; // 0 is the blank snapshot "--", 1..16 the saved ones
+	SnapshotStore snapshots;
+	int snapshotSlot = 1; // see Snapshots.hpp: 0 is the blank "--" 
 	int snapshotArmed = SNAP_NONE;
 
 	// Bumped by anything that may have changed the edited sequence, so the host can tell
@@ -85,6 +84,8 @@ struct Engine {
 				r = -1;
 			panel.modifierMode = false;
 			panel.euclidActive = false;
+			// Without the expander only the blank and slots 1..16 are reachable.
+			snapshotSlot = std::max(0, std::min(snapshotSlot, NUM_STANDALONE_SLOTS));
 		}
 		expander = attached;
 		panel.expander = attached;
@@ -230,8 +231,8 @@ struct Engine {
 				return;
 			case BUTTON_SAVE:
 				panel.markChord();
-				// The blank snapshot cannot be overwritten.
-				if (snapshotSlot > 0)
+				// The blank snapshot cannot be overwritten (templates, below it, can).
+				if (snapshotSlot != 0)
 					snapshotArmed = SNAP_SAVE;
 				return;
 			default:
@@ -250,7 +251,8 @@ struct Engine {
 		editGeneration++;
 		if (panel.leftFocus == FOCUS_SNAPSHOT && !panel.mathScreen() && !panel.optionsScreen) {
 			panel.markChord();
-			snapshotSlot = std::max(0, std::min(snapshotSlot + d, NUM_SNAPSHOTS));
+			snapshotSlot = std::max(SnapshotStore::minSlot(expander),
+			                        std::min(snapshotSlot + d, SnapshotStore::maxSlot(expander)));
 			return;
 		}
 		panel.turnLeft(editSeq(), editTr(), d);
@@ -491,10 +493,11 @@ private:
 	// and rewinds every cursor. In HOLD it loads into the shadow, to be cued with COMMIT.
 	void loadSnapshot() {
 		Sequence& target = editSeq();
-		if (snapshotSlot == 0 || !snapshotUsed[snapshotSlot - 1])
-			target.clearAll();
+		const Sequence* saved = snapshots.get(snapshotSlot);
+		if (saved)
+			target = *saved;
 		else
-			target = snapshots[snapshotSlot - 1];
+			target.clearAll();
 		if (mode == MODE_HOLD) {
 			shadowTr.rewind(shadow, false);
 		}
@@ -505,10 +508,7 @@ private:
 	}
 
 	void saveSnapshot() {
-		if (snapshotSlot == 0)
-			return;
-		snapshots[snapshotSlot - 1] = editSeq();
-		snapshotUsed[snapshotSlot - 1] = true;
+		snapshots.save(snapshotSlot, editSeq());
 	}
 };
 

@@ -17,9 +17,8 @@ rm -f "$log"
 make test 2>&1 | grep -v '^ok' | tail -30
 [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "TESTS FAILED"; exit 1; }
 
-# The serialization round trip links libRack, so it needs Rack's install folder.
-RACK_INSTALL="${RACK_INSTALL:-/c/Program Files/VCV/Rack2Pro}"
-PATH="$RACK_INSTALL:$PATH" make test-rack 2>&1 | grep -E 'FAIL|passed|error' | tail -20
+# The serialization round trip links libRack (see the Makefile for RACK_INSTALL).
+make test-rack 2>&1 | grep -E 'FAIL|passed|error' | tail -20
 [ "${PIPESTATUS[0]}" -eq 0 ] || { echo "SERIALIZE TESTS FAILED"; exit 1; }
 
 make install 2>&1 | tail -1

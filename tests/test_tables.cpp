@@ -1,4 +1,4 @@
-﻿// Tests for voltage tables: the reference tables, voltage editing granularity, and the
+// Tests for voltage tables: the reference tables, voltage editing granularity, and the
 // panel's INDEX / VOLTAGE / reference-table handling (manual, Voltage Tables).
 
 #include "Panel.hpp"

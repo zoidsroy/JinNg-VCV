@@ -191,7 +191,7 @@ TEST(save_and_load_a_snapshot) {
 	r.tap(BUTTON_SAVE);
 	CHECK(r.message() == "Abrt" || r.message() == "");
 	r.tap(BUTTON_SAVE); // confirm: into slot 1
-	CHECK(r.e.snapshotUsed[0]);
+	CHECK(r.e.snapshots.saved(1));
 	// Change things, move around, then load it back.
 	r.tap(FOCUS_STEP);
 	r.tap(BUTTON_DELETE);
@@ -237,7 +237,7 @@ TEST(snapshot_selection_range) {
 	EngineRig r(threeSteps(1));
 	r.tap(FOCUS_SNAPSHOT);
 	r.e.turnLeft(40);
-	CHECK_EQ(r.e.view().snapshot, NUM_SNAPSHOTS);
+	CHECK_EQ(r.e.view().snapshot, NUM_STANDALONE_SLOTS);
 	r.e.turnLeft(-40);
 	CHECK_EQ(r.e.view().snapshot, 0);
 }

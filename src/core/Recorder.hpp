@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Recording (docs/SPEC-ER102.md §5): the expander's ARM / PUNCH controls and its six
 // inputs, in three modes.
 //   ALTER:     each step an armed track reaches is rewritten from the inputs as it starts.

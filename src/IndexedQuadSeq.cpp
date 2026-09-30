@@ -2,11 +2,15 @@
 #include "Expander.hpp"
 #include "Serialize.hpp"
 #include "core/Engine.hpp"
+#include "core/Midi.hpp"
 #include "core/NoteFormat.hpp"
 #include "core/Transform.hpp"
 #include "core/UndoTracker.hpp"
 #include "ui/Components.hpp"
 #include <atomic>
+#include <fstream>
+#include <iterator>
+#include <osdialog.h>
 
 // The sequencer itself is iqs::Engine (src/core), which has no Rack dependency. This
 // module only turns params and jacks into Engine events and reads its outputs back.
@@ -104,6 +108,9 @@ struct IndexedQuadSeq : Module {
 	std::atomic<int> rightTurns{0};
 	std::atomic<bool> loadDemoRequested{false};
 	std::atomic<bool> clearRequested{false};
+	// MIDI import: the UI thread builds the sequence here, the audio thread swaps it in.
+	iqs::Sequence importBuffer;
+	std::atomic<bool> importRequested{false};
 
 	// Published by process() for the displays.
 	iqs::PanelView view;
@@ -131,6 +138,7 @@ struct IndexedQuadSeq : Module {
 
 	void uiStep();
 	void requestRestore(const iqs::Sequence& s);
+	void importMidi();
 
 	IndexedQuadSeq() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
@@ -187,8 +195,7 @@ struct IndexedQuadSeq : Module {
 	// Initialize: a blank sequencer, snapshots included.
 	void onReset() override {
 		engine.live.clearAll();
-		for (bool& used : engine.snapshotUsed)
-			used = false;
+		engine.snapshots.clear();
 		engine.snapshotSlot = 1;
 		iqs::Panel& p = engine.panel;
 		p.leftFocus = FOCUS_TRACK;
@@ -254,6 +261,12 @@ struct IndexedQuadSeq : Module {
 		}
 		if (loadDemoRequested.exchange(false))
 			loadDemo();
+		if (importRequested) {
+			engine.live = importBuffer;
+			engine.liveReplaced();
+			engine.editGeneration++; // undoable
+			importRequested = false;
+		}
 		if (restoreRequested) {
 			engine.restoreEdited(restoreBuffer);
 			restoreRequested = false;
@@ -411,13 +424,15 @@ struct IndexedQuadSeq : Module {
 	json_t* dataToJson() override {
 		json_t* rootJ = json_object();
 		json_object_set_new(rootJ, "sequence", iqs::sequenceToJson(engine.live));
+		// Saved slots only; templates have negative slot numbers (see Snapshots.hpp).
 		json_t* snapshotsJ = json_array();
-		for (int i = 0; i < iqs::NUM_SNAPSHOTS; i++) {
-			if (!engine.snapshotUsed[i])
+		for (int slot = -iqs::NUM_TEMPLATES; slot <= iqs::NUM_REGULAR_SLOTS; slot++) {
+			const iqs::Sequence* saved = engine.snapshots.get(slot);
+			if (!saved)
 				continue;
 			json_t* snapJ = json_object();
-			json_object_set_new(snapJ, "slot", json_integer(i + 1));
-			json_object_set_new(snapJ, "sequence", iqs::sequenceToJson(engine.snapshots[i]));
+			json_object_set_new(snapJ, "slot", json_integer(slot));
+			json_object_set_new(snapJ, "sequence", iqs::sequenceToJson(*saved));
 			json_array_append_new(snapshotsJ, snapJ);
 		}
 		json_object_set_new(rootJ, "snapshots", snapshotsJ);
@@ -442,19 +457,19 @@ struct IndexedQuadSeq : Module {
 
 	void dataFromJson(json_t* rootJ) override {
 		iqs::sequenceFromJson(engine.live, json_object_get(rootJ, "sequence"));
-		for (bool& used : engine.snapshotUsed)
-			used = false;
+		engine.snapshots.clear();
 		json_t* snapshotsJ = json_object_get(rootJ, "snapshots");
+		iqs::Sequence loaded;
 		for (size_t i = 0; i < json_array_size(snapshotsJ); i++) {
 			json_t* snapJ = json_array_get(snapshotsJ, i);
 			int slot = (int) json_integer_value(json_object_get(snapJ, "slot"));
-			if (slot < 1 || slot > iqs::NUM_SNAPSHOTS)
+			if (!iqs::SnapshotStore::storable(slot))
 				continue;
-			iqs::sequenceFromJson(engine.snapshots[slot - 1], json_object_get(snapJ, "sequence"));
-			engine.snapshotUsed[slot - 1] = true;
+			iqs::sequenceFromJson(loaded, json_object_get(snapJ, "sequence"));
+			engine.snapshots.save(slot, loaded);
 		}
 		if (json_t* j = json_object_get(rootJ, "snapshotSlot"))
-			engine.snapshotSlot = clamp((int) json_integer_value(j), 0, iqs::NUM_SNAPSHOTS);
+			engine.snapshotSlot = clamp((int) json_integer_value(j), -iqs::NUM_TEMPLATES, iqs::NUM_REGULAR_SLOTS);
 		if (json_t* j = json_object_get(rootJ, "resetMode"))
 			engine.tr.resetMode = clamp((int) json_integer_value(j), 0, (int) iqs::RESET_STARTS_FIRST_STEP);
 		if (json_t* j = json_object_get(rootJ, "paused"))
@@ -528,6 +543,36 @@ void IndexedQuadSeq::uiStep() {
 		captureRequested = true;
 		undo.captureRequested();
 	}
+}
+
+// Import MIDI file (UI thread): channels 1-4 become tracks 1-4 and replace everything
+// (see src/core/Midi.hpp). Undoable.
+void IndexedQuadSeq::importMidi() {
+	osdialog_filters* filters = osdialog_filters_parse("MIDI files:mid,midi,smf");
+	char* path = osdialog_file(OSDIALOG_OPEN, NULL, NULL, filters);
+	osdialog_filters_free(filters);
+	if (!path)
+		return;
+	std::ifstream file(path, std::ios::binary);
+	std::free(path);
+	std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+
+	iqs::MidiSong song;
+	std::string error;
+	if (!iqs::parseMidi(bytes.data(), bytes.size(), song, error)) {
+		osdialog_message(OSDIALOG_WARNING, OSDIALOG_OK, ("Could not import: " + error + ".").c_str());
+		return;
+	}
+	if (importRequested)
+		return; // the previous import has not been applied yet
+	bool truncated = false;
+	if (!iqs::midiToSequence(song, importBuffer, iqs::MidiImportOptions(), truncated)) {
+		osdialog_message(OSDIALOG_WARNING, OSDIALOG_OK, "No notes on MIDI channels 1-4.");
+		return;
+	}
+	importRequested = true;
+	if (truncated)
+		osdialog_message(OSDIALOG_INFO, OSDIALOG_OK, "The file was longer than 2000 steps; the rest was left out.");
 }
 
 void IndexedQuadSeq::requestRestore(const iqs::Sequence& s) {
@@ -657,6 +702,7 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 			{"Next clock plays the first step", "First step sounds at the reset"},
 			[m]() { return m->engine.tr.resetMode; },
 			[m](int mode) { m->engine.tr.resetMode = mode; }));
+		menu->addChild(createMenuItem("Import MIDI file...", "", [m]() { m->importMidi(); }));
 		menu->addChild(new MenuSeparator);
 		menu->addChild(createMenuLabel("Testing"));
 		menu->addChild(createMenuItem("Load demo sequence", "", [m]() { m->loadDemoRequested = true; }));
@@ -758,7 +804,7 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 			return std::to_string(v.options.clockMul);
 		}));
 		addDisplay(L_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "1", leftRow(3, "1", [](const iqs::PanelView& v) {
-			return v.snapshot > 0 ? std::to_string(v.snapshot) : std::string("--");
+			return iqs::SnapshotStore::name(v.snapshot, v.expander);
 		}));
 		// On the track options screen the right column shows CV-A/CV-B note (Nt) or number
 		// (Nr) display, the clock divider, and gate (Gt) or trigger (tr) output.

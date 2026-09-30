@@ -1,4 +1,4 @@
-﻿// Tests for the time-based features: ratchet, trigger mode, clock division and
+// Tests for the time-based features: ratchet, trigger mode, clock division and
 // multiplication, and smoothing (src/core/Transport.hpp, ClockDivMul.hpp), plus the
 // panel controls that set them (SMOOTH, the track options screen).
 

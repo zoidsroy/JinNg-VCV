@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Decides when panel activity becomes an undo step (host side, UI thread).
 //
 // The sequence changes on the audio thread; the host's undo history lives on the UI

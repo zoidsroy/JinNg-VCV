@@ -1,4 +1,4 @@
-﻿// Tests for the sequence model, playback, transport and note formatting.
+// Tests for the sequence model, playback, transport and note formatting.
 
 #include "Sequence.hpp"
 #include "Playhead.hpp"

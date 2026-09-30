@@ -1,4 +1,4 @@
-﻿// Tests for editing: src/core/Editor.hpp and the front-panel state machine in
+// Tests for editing: src/core/Editor.hpp and the front-panel state machine in
 // src/core/Panel.hpp. Where possible they follow the manual's own procedures.
 
 #include "Editor.hpp"

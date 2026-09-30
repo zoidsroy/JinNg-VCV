@@ -3,7 +3,7 @@
 一個受 Orthogonal Devices ER-101 啟發的 4 軌 indexed sequencer，做成 VCV Rack 2 模組。
 
 - 行為規格：[docs/SPEC.md](docs/SPEC.md)
-- 目前進度：階段 5 完成（EDIT/FOLLOW/HOLD 與 COMMIT、MATH、16 個 snapshot、量化 reset），功能面已涵蓋手冊全部章節；下一步是階段 6：面板美術與上架準備
+- 目前進度：ER-101 手冊全部章節（階段 1–5）與 Ctrl+Z 完成；ER-102 擴充模組（Sequencer Controller）E1–E5 完成，規格見 [docs/SPEC-ER102.md](docs/SPEC-ER102.md)。剩下階段 6：面板美術與上架準備
 - 單元測試：在 MINGW64 shell 中執行 `make test`，不需要 Rack
 
 ## Windows 開發環境

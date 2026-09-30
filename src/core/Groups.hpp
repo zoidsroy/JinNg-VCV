@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Groups (docs/SPEC-ER102.md §4): step selections, Euclidean masks, and what the X/Y/Z
 // modulation bus does to member steps while they play.
 
