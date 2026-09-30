@@ -1,11 +1,11 @@
-#pragma once
+﻿#pragma once
 // Sequence data model (docs/SPEC.md §2). Plain C++11, no Rack dependency, so it can be
 // unit-tested on its own.
 //
-// A track's steps are stored as one flat list; patterns are just a list of lengths that
-// partition it. Playback only ever needs the flat index, and loop points are flat
-// indices too. Every vector reserves its hardware maximum up front, so edits made on
-// the audio thread never reallocate.
+// A track's steps are stored as one flat list; patterns are a list of lengths (plus their
+// smooth flags) that partition it. Playback only ever needs the flat index, and loop
+// points are flat indices too. Every vector reserves its hardware maximum up front, so
+// edits made on the audio thread never reallocate.
 
 #include <algorithm>
 #include <array>
@@ -31,6 +31,21 @@ struct Step {
 	bool smoothA = false;
 	bool smoothB = false;
 	bool ratchet = false;
+};
+
+struct Pattern {
+	uint8_t length = 0;
+	bool smoothA = false;
+	bool smoothB = false;
+};
+
+// Per-track settings from the track options screen (spec §4.8).
+struct TrackOptions {
+	bool noteDisplayA = true; // CV-A shown as a note (Nt) rather than a number (Nr)
+	bool noteDisplayB = true;
+	uint8_t clockDiv = 1;     // 1..99
+	uint8_t clockMul = 1;     // 1..99
+	bool triggerMode = false; // GATE outputs triggers (tr) rather than gates (Gt)
 };
 
 struct VoltageTable {
@@ -62,15 +77,18 @@ struct VoltageTable {
 
 struct Track {
 	std::vector<Step> steps;
-	std::vector<uint8_t> patternLengths;
+	std::vector<Pattern> patterns;
 	int loopStart = -1; // flat step index, or -1 for none
 	int loopEnd = -1;
+	bool smoothA = false; // track-wide smoothing
+	bool smoothB = false;
+	TrackOptions options;
 	VoltageTable tableA;
 	VoltageTable tableB;
 
 	Track() {
 		steps.reserve(MAX_TOTAL_STEPS);
-		patternLengths.reserve(MAX_PATTERNS);
+		patterns.reserve(MAX_PATTERNS);
 	}
 
 	// Copy assignment must keep the reserved capacity, which std::vector's own
@@ -80,9 +98,12 @@ struct Track {
 	}
 	Track& operator=(const Track& o) {
 		steps.assign(o.steps.begin(), o.steps.end());
-		patternLengths.assign(o.patternLengths.begin(), o.patternLengths.end());
+		patterns.assign(o.patterns.begin(), o.patterns.end());
 		loopStart = o.loopStart;
 		loopEnd = o.loopEnd;
+		smoothA = o.smoothA;
+		smoothB = o.smoothB;
+		options = o.options;
 		tableA = o.tableA;
 		tableB = o.tableB;
 		return *this;
@@ -102,13 +123,13 @@ struct Track {
 	// Which pattern a flat step index falls in, and its position inside that pattern.
 	void locate(int stepIndex, int& pattern, int& stepInPattern) const {
 		int start = 0;
-		for (int p = 0; p < (int) patternLengths.size(); p++) {
-			if (stepIndex < start + patternLengths[p]) {
+		for (int p = 0; p < (int) patterns.size(); p++) {
+			if (stepIndex < start + patterns[p].length) {
 				pattern = p;
 				stepInPattern = stepIndex - start;
 				return;
 			}
-			start += patternLengths[p];
+			start += patterns[p].length;
 		}
 		pattern = -1;
 		stepInPattern = -1;
@@ -128,9 +149,9 @@ struct Sequence {
 	// Appends an empty pattern to a track. Returns false at the hardware limit.
 	bool appendPattern(int track) {
 		Track& t = tracks[track];
-		if ((int) t.patternLengths.size() >= MAX_PATTERNS)
+		if ((int) t.patterns.size() >= MAX_PATTERNS)
 			return false;
-		t.patternLengths.push_back(0);
+		t.patterns.push_back(Pattern());
 		return true;
 	}
 
@@ -140,21 +161,23 @@ struct Sequence {
 		Track& t = tracks[track];
 		if (totalSteps() >= MAX_TOTAL_STEPS)
 			return false;
-		if (t.patternLengths.empty() && !appendPattern(track))
+		if (t.patterns.empty() && !appendPattern(track))
 			return false;
-		if (t.patternLengths.back() >= MAX_STEPS_PER_PATTERN)
+		if (t.patterns.back().length >= MAX_STEPS_PER_PATTERN)
 			return false;
 		t.steps.push_back(step);
-		t.patternLengths.back()++;
+		t.patterns.back().length++;
 		return true;
 	}
 
 	void clearTrack(int track) {
 		Track& t = tracks[track];
 		t.steps.clear();
-		t.patternLengths.clear();
+		t.patterns.clear();
 		t.loopStart = -1;
 		t.loopEnd = -1;
+		t.smoothA = false;
+		t.smoothB = false;
 	}
 };
 

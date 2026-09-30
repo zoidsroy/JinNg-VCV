@@ -7,8 +7,8 @@
 #include "ui/Components.hpp"
 #include <atomic>
 
-// Stage 2: the panel edits the sequence in EDIT mode (src/core/Panel.hpp) while the
-// engine plays it. All panel input is handled on the audio thread (buttons are params,
+// The panel edits the sequence in EDIT mode (src/core/Panel.hpp) while the engine plays
+// it; smoothing, ratchet, trigger mode and clock div/mul are in src/core/Transport.hpp. All panel input is handled on the audio thread (buttons are params,
 // encoder turns arrive through atomics), so the audio thread is the only writer of the
 // sequence and no locking is needed.
 
@@ -239,10 +239,8 @@ struct IndexedQuadSeq : Module {
 		transport.process(seq, args.sampleTime, clockEdge, resetEdge, resetHeld);
 
 		for (int t = 0; t < NUM_TRACKS; t++) {
-			const iqs::Track& track = seq.tracks[t];
-			const iqs::Playhead& ph = transport.playheads[t];
-			outputs[CV_A_OUTPUT + t].setVoltage(ph.cvA(track));
-			outputs[CV_B_OUTPUT + t].setVoltage(ph.cvB(track));
+			outputs[CV_A_OUTPUT + t].setVoltage(transport.cvA(seq, t));
+			outputs[CV_B_OUTPUT + t].setVoltage(transport.cvB(seq, t));
 			outputs[GATE_OUTPUT + t].setVoltage(transport.gate(seq, t) ? 10.f : 0.f);
 		}
 
@@ -251,6 +249,7 @@ struct IndexedQuadSeq : Module {
 			for (int f = 0; f < FOCUS_LEN; f++)
 				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(panel.focusLed(f)));
 			lights[COPY_LIGHT].setBrightness(panel.copyLed());
+			lights[SMOOTH_LIGHT].setBrightness(panel.smoothLed(seq));
 			lights[LOOP_START_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, true)));
 			lights[LOOP_END_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, false)));
 			lights[PAUSE_LIGHT].setBrightness(transport.paused);
@@ -350,9 +349,13 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		};
 	}
 
-	// A step field for a 2-digit display, or "--" when the cursor has no step.
-	std::function<std::string()> stepField(std::function<int(const iqs::Step&)> field) {
-		return fromView("--", [field](const iqs::PanelView& v) {
+	// A step field for a 2-digit display ("--" when the cursor has no step), or the track
+	// option shown in its place on the options screen.
+	std::function<std::string()> stepField(std::function<int(const iqs::Step&)> field,
+	                                       std::function<std::string(const iqs::TrackOptions&)> option) {
+		return fromView("--", [field, option](const iqs::PanelView& v) {
+			if (v.optionsScreen)
+				return option(v.options);
 			return v.stepInPattern >= 0 ? std::to_string(field(v.step)) : std::string("--");
 		});
 	}
@@ -414,7 +417,9 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP - 2.3f)), module, IndexedQuadSeq::VOLTAGE_FINE_LIGHT));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP + 2.3f)), module, IndexedQuadSeq::VOLTAGE_COARSE_LIGHT));
 		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", fromView("0.C.00", [](const iqs::PanelView& v) {
-			return v.message ? std::string(v.message) : iqs::formatNote(v.voltage);
+			if (v.message)
+				return std::string(v.message);
+			return v.noteDisplay ? iqs::formatNote(v.voltage) : iqs::formatVoltage(v.voltage);
 		}));
 
 		// --- Display grid.
@@ -431,15 +436,25 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addDisplay(L_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
 			return v.pattern >= 0 ? std::to_string(v.pattern + 1) : std::string("--");
 		}));
+		// On the track options screen STEP shows the clock multiplier.
 		addDisplay(L_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
+			if (v.optionsScreen)
+				return std::to_string(v.options.clockMul);
 			return v.stepInPattern >= 0 ? std::to_string(v.stepInPattern + 1) : std::string("--");
 		}));
 		addDisplay(L_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "1");
-		addDisplay(R_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvA; }));
-		addDisplay(R_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvB; }));
-		addDisplay(R_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.duration; }));
+		// On the track options screen the right column shows CV-A/CV-B note (Nt) or number
+		// (Nr) display, the clock divider, and gate (Gt) or trigger (tr) output.
+		addDisplay(R_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvA; },
+			[](const iqs::TrackOptions& o) { return std::string(o.noteDisplayA ? "Nt" : "Nr"); }));
+		addDisplay(R_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvB; },
+			[](const iqs::TrackOptions& o) { return std::string(o.noteDisplayB ? "Nt" : "Nr"); }));
+		addDisplay(R_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.duration; },
+			[](const iqs::TrackOptions& o) { return std::to_string(o.clockDiv); }));
 		// GATE lights both decimal points when the step ratchets.
 		addDisplay(R_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
+			if (v.optionsScreen)
+				return std::string(v.options.triggerMode ? "tr" : "Gt");
 			if (v.stepInPattern < 0)
 				return std::string("--");
 			std::string digits = string::f("%2d", (int) v.step.gate);

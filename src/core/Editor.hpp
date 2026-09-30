@@ -11,18 +11,18 @@ namespace iqs {
 namespace edit {
 
 inline int numPatterns(const Track& t) {
-	return (int) t.patternLengths.size();
+	return (int) t.patterns.size();
 }
 
 inline int patternStart(const Track& t, int p) {
 	int start = 0;
 	for (int i = 0; i < p && i < numPatterns(t); i++)
-		start += t.patternLengths[i];
+		start += t.patterns[i].length;
 	return start;
 }
 
 inline int patternEnd(const Track& t, int p) {
-	return patternStart(t, p) + t.patternLengths[p];
+	return patternStart(t, p) + t.patterns[p].length;
 }
 
 // Shifts indices at or after `pos` by `n` (n < 0 for removals); an index inside a
@@ -67,11 +67,11 @@ inline bool insertSteps(Sequence& seq, int track, int p, int pos, const Step* sr
 		return false;
 	if (pos < patternStart(t, p) || pos > patternEnd(t, p))
 		return false;
-	if (seq.totalSteps() + n > MAX_TOTAL_STEPS || t.patternLengths[p] + n > MAX_STEPS_PER_PATTERN)
+	if (seq.totalSteps() + n > MAX_TOTAL_STEPS || t.patterns[p].length + n > MAX_STEPS_PER_PATTERN)
 		return false;
 	bool hadSteps = t.numSteps() > 0;
 	t.steps.insert(t.steps.begin() + pos, src, src + n);
-	t.patternLengths[p] += n;
+	t.patterns[p].length = (uint8_t) (t.patterns[p].length + n);
 	shiftAfterInsert(t, ph, pos, n, hadSteps);
 	return true;
 }
@@ -83,25 +83,25 @@ inline bool removeStep(Sequence& seq, int track, int pos, Playhead& ph) {
 	int p, s;
 	t.locate(pos, p, s);
 	t.steps.erase(t.steps.begin() + pos);
-	t.patternLengths[p]--;
+	t.patterns[p].length--;
 	shiftAfterRemove(t, ph, pos, 1);
 	return true;
 }
 
 // Inserts `count` patterns before pattern index `at` (at == numPatterns appends).
-// `lengths` gives each new pattern's length and `src` their steps back to back.
-inline bool insertPatterns(Sequence& seq, int track, int at, const uint8_t* lengths, int count, const Step* src, Playhead& ph) {
+// `src` holds the new patterns' steps back to back.
+inline bool insertPatterns(Sequence& seq, int track, int at, const Pattern* patterns, int count, const Step* src, Playhead& ph) {
 	Track& t = seq.tracks[track];
 	if (at < 0 || at > numPatterns(t) || count <= 0)
 		return false;
 	int n = 0;
 	for (int i = 0; i < count; i++)
-		n += lengths[i];
+		n += patterns[i].length;
 	if (numPatterns(t) + count > MAX_PATTERNS || seq.totalSteps() + n > MAX_TOTAL_STEPS)
 		return false;
 	int pos = patternStart(t, at);
 	bool hadSteps = t.numSteps() > 0;
-	t.patternLengths.insert(t.patternLengths.begin() + at, lengths, lengths + count);
+	t.patterns.insert(t.patterns.begin() + at, patterns, patterns + count);
 	if (n > 0) {
 		t.steps.insert(t.steps.begin() + pos, src, src + n);
 		shiftAfterInsert(t, ph, pos, n, hadSteps);
@@ -110,8 +110,8 @@ inline bool insertPatterns(Sequence& seq, int track, int at, const uint8_t* leng
 }
 
 inline bool insertEmptyPattern(Sequence& seq, int track, int at, Playhead& ph) {
-	uint8_t zero = 0;
-	return insertPatterns(seq, track, at, &zero, 1, nullptr, ph);
+	Pattern empty;
+	return insertPatterns(seq, track, at, &empty, 1, nullptr, ph);
 }
 
 inline bool removePattern(Sequence& seq, int track, int p, Playhead& ph) {
@@ -119,9 +119,9 @@ inline bool removePattern(Sequence& seq, int track, int p, Playhead& ph) {
 	if (p < 0 || p >= numPatterns(t))
 		return false;
 	int pos = patternStart(t, p);
-	int n = t.patternLengths[p];
+	int n = t.patterns[p].length;
 	t.steps.erase(t.steps.begin() + pos, t.steps.begin() + pos + n);
-	t.patternLengths.erase(t.patternLengths.begin() + p);
+	t.patterns.erase(t.patterns.begin() + p);
 	if (n > 0)
 		shiftAfterRemove(t, ph, pos, n);
 	return true;
@@ -149,10 +149,13 @@ inline bool splitPattern(Sequence& seq, int track, int p, int stepInPattern) {
 	Track& t = seq.tracks[track];
 	if (p < 0 || p >= numPatterns(t) || numPatterns(t) >= MAX_PATTERNS)
 		return false;
-	int len = t.patternLengths[p];
+	int len = t.patterns[p].length;
 	int k = std::max(0, std::min(stepInPattern, len));
-	t.patternLengths[p] = (uint8_t) k;
-	t.patternLengths.insert(t.patternLengths.begin() + p + 1, (uint8_t) (len - k));
+	// Both halves keep the pattern's smooth flags.
+	Pattern second = t.patterns[p];
+	second.length = (uint8_t) (len - k);
+	t.patterns[p].length = (uint8_t) k;
+	t.patterns.insert(t.patterns.begin() + p + 1, second);
 	return true;
 }
 

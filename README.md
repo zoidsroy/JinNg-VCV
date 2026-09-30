@@ -3,7 +3,7 @@
 一個受 Orthogonal Devices ER-101 啟發的 4 軌 indexed sequencer，做成 VCV Rack 2 模組。
 
 - 行為規格：[docs/SPEC.md](docs/SPEC.md)
-- 目前進度：階段 2 完成（EDIT 模式下的編輯），下一步是階段 3：smooth、ratchet、trigger 模式、clock 除頻與倍頻
+- 目前進度：階段 3 完成（smooth、ratchet、trigger 模式、clock 除頻與倍頻、軌道選項），下一步是階段 4：電壓表編輯與參考表
 - 單元測試：在 MINGW64 shell 中執行 `make test`，不需要 Rack
 
 ## Windows 開發環境
@@ -21,6 +21,7 @@
    export RACK_DIR=/c/GitWorkspace/Rack-SDK
    make install
    ```
+   或執行 `scripts/build.sh`，會一次完成 build、測試和安裝。
    `make install` 會把外掛裝到 `%LOCALAPPDATA%\Rack2\plugins-win-x64`，重新啟動 Rack 就能載入。這台電腦上裝的是 Rack 2 Pro，Pro 版和 Free 版用同一個使用者資料夾。
 
 Build 時請暫時關閉防毒軟體的即時掃描，否則編譯會非常慢。

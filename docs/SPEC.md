@@ -97,7 +97,9 @@ Module
 - 滑動從 gate 變低的時候開始，到下一個 step 開始時結束，也就是時間長度為 `duration − gate` 個 pulse。
 - **[VCV]** 滑動需要把「pulse」換算成秒：用最近量到的 clock 週期（每軌除頻、倍頻之後的週期）乘上 pulse 數，在每個 sample 內插。這也是手冊說的「滑動時間會即時跟著 tempo 調整」。
 - 從手冊的 LFO 範例可以推得：gate = 0 時，整個 step 都在滑動。duration = 0 的 step 如果開了 smooth，會變成瞬間跳到下一個電壓（鋸齒波範例就是這樣做的）。
-- **[未定]** 「下一個 step」是指跳過 duration=0 之後的下一個，還是字面上的下一個 step？另外，loop 回頭時的下一個 step 是 loop start 嗎？以鋸齒波範例來看，duration=0 的 step 仍然提供了起點電壓，所以應該是字面上的下一個 step，並考慮 loop。實作時要寫測試把這個行為固定下來。
+- **[已實作，階段 3]** 滑向「字面上的下一步」，依 loop 規則決定是哪一步，所以 loop END 的下一步是 loop START。duration=0 的步雖然不會被播放，但仍然是滑動的終點。手冊的三角波和鋸齒波 LFO 範例都寫成了測試。
+  - 滑動進度以「已經過的 pulse 數 + 目前 pulse 已經過的比例」計算，後者由量到的 clock 週期換算。所以 tempo 改變時，滑動會跟著調整。clock 週期量到之前，只會在每個 pulse 前進一格。
+  - smooth 的判斷：step、pattern、track 三層，任一層開啟就平滑；A 和 B 分開。SMOOTH 按鈕依 focus 決定切換哪一層，依 TABLE 開關決定切換 A 還是 B；開關在 ref 時不動作。
 
 ### 3.6 Clock 除頻與倍頻（每軌）
 - 除頻 N：外部 pulse 編號 1, 2, 3…，只讓第 1, 1+N, 1+2N… 個通過。
@@ -281,14 +283,14 @@ src/
 ## 7. 待確認問題彙整
 
 1. reset 之後的第一個 clock，是播放 step 1 還是前進到 step 2？（3.7）→ 目前做成選項，預設為播放 step 1。
-2. smooth 的「下一個 step」怎麼認定：duration=0 的 step 算不算、loop 回頭時怎麼算？（3.5）
+2. smooth 的「下一個 step」怎麼認定：duration=0 的 step 算不算、loop 回頭時怎麼算？（3.5）→ 已決定：用字面上的下一步（依 loop 規則），duration=0 的步也算。手冊的鋸齒波範例只有這樣才成立。
 3. 連續 legato step 之間 gate 是否會中斷？（3.2）
-4. Trigger 模式加 ratchet 時，多次觸發的時間分布方式。（3.3）
-5. 除頻與倍頻同時設定時的處理順序。（3.6）
+4. Trigger 模式加 ratchet 時，多次觸發的時間分布方式。（3.3）→ 目前平均分布在整個 step 內。
+5. 除頻與倍頻同時設定時的處理順序。（3.6）→ 目前先除頻、再倍頻。
 6. 刪除 loop 點所在的 step 時，loop 點怎麼處理。（3.8）→ 目前的做法是清除該 loop 點。
 7. 內建參考表 22JT、BLUE、PEnt、E-8、LE-8 的精確數值；12ET 中超過 8.192V 的索引。（2）
 8. 「量化」math 運算是否存在於 v2.09 韌體。（4.6）
-9. TRACK 的 focus 按下，到底是顯示總 pulse 數還是進入軌道選項。（4.2）
+9. TRACK 的 focus 按下，到底是顯示總 pulse 數還是進入軌道選項。（4.2）→ 目前做成進入軌道選項；再按一次離開。
 10. ER-102 擴充模組：這份手冊沒有涵蓋。如果要支援，需要另外找 ER-102 的手冊。
 
 有實機、官方論壇討論串或 ER-101 Programmer 匯出的 XML，就能回答大部分的問題。

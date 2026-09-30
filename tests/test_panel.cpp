@@ -1,4 +1,4 @@
-// Tests for editing: src/core/Editor.hpp and the front-panel state machine in
+﻿// Tests for editing: src/core/Editor.hpp and the front-panel state machine in
 // src/core/Panel.hpp. Where possible they follow the manual's own procedures.
 
 #include "Editor.hpp"
@@ -38,10 +38,10 @@ struct Rig {
 		const Track& tr0 = seq.tracks[t];
 		std::string out;
 		int i = 0;
-		for (size_t p = 0; p < tr0.patternLengths.size(); p++) {
+		for (size_t p = 0; p < tr0.patterns.size(); p++) {
 			if (p > 0)
 				out += "| ";
-			for (int k = 0; k < tr0.patternLengths[p]; k++, i++)
+			for (int k = 0; k < tr0.patterns[p].length; k++, i++)
 				out += std::to_string(tr0.steps[i].cvA) + " ";
 		}
 		if (!out.empty())
@@ -170,9 +170,9 @@ TEST(patterns_insert_and_navigate) {
 	CHECK_EQ(r.view().pattern, 1);
 	r.tap(FOCUS_STEP);
 	r.tap(BUTTON_INSERT);
-	CHECK_EQ(r.track().patternLengths.size(), (size_t) 2);
-	CHECK_EQ((int) r.track().patternLengths[0], 2);
-	CHECK_EQ((int) r.track().patternLengths[1], 1);
+	CHECK_EQ(r.track().patterns.size(), (size_t) 2);
+	CHECK_EQ((int) r.track().patterns[0].length, 2);
+	CHECK_EQ((int) r.track().patterns[1].length, 1);
 
 	// STEP moves across pattern boundaries.
 	r.left(-1);
@@ -229,7 +229,7 @@ TEST(delete_step_keeps_cursor_in_place) {
 	CHECK_EQ(r.cvs(), std::string(""));
 	CHECK_EQ(r.view().stepInPattern, -1);
 	r.tap(BUTTON_DELETE); // nothing left to delete
-	CHECK_EQ(r.track().patternLengths.size(), (size_t) 1);
+	CHECK_EQ(r.track().patterns.size(), (size_t) 1);
 }
 
 TEST(delete_pattern) {
@@ -246,7 +246,7 @@ TEST(delete_pattern) {
 
 TEST(clear_track_needs_confirmation) {
 	Rig r(build({{1, 1, 1}, {2, 1, 1}}));
-	r.tap(FOCUS_TRACK);
+	// TRACK is focused already; pressing it again would open the options screen.
 	r.tap(BUTTON_DELETE);
 	CHECK_EQ(str(r.view().message), std::string("CLr"));
 	CHECK_EQ(r.track().numSteps(), 2);
@@ -321,8 +321,7 @@ TEST(step_clipboard_on_pattern_focus_inserts_empty_pattern) {
 TEST(copy_track_onto_another) {
 	Rig r(build({{1, 2, 1}, {2, 2, 1}}));
 	r.seq.tracks[0].loopEnd = 1;
-	r.tap(FOCUS_TRACK);
-	r.tap(BUTTON_COPY);
+	r.tap(BUTTON_COPY); // TRACK is focused already
 	r.left(2);
 	r.tap(BUTTON_INSERT);
 	CHECK_EQ(r.cvs(2), std::string("1 2"));

@@ -1,9 +1,10 @@
-#pragma once
+﻿#pragma once
 // Patch (de)serialization of the sequence. Kept out of src/core because it uses
 // Rack's jansson.
 //
 // Each step is stored compactly as [cvA, cvB, duration, gate, flags] with flags
-// bit 0 = smooth A, bit 1 = smooth B, bit 2 = ratchet.
+// bit 0 = smooth A, bit 1 = smooth B, bit 2 = ratchet. Patterns are [length, flags]
+// with the same smooth bits.
 
 #include "plugin.hpp"
 #include "core/Sequence.hpp"
@@ -38,9 +39,22 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		json_object_set_new(trackJ, "steps", stepsJ);
 
 		json_t* patternsJ = json_array();
-		for (uint8_t len : t.patternLengths)
-			json_array_append_new(patternsJ, json_integer(len));
+		for (const Pattern& p : t.patterns) {
+			int flags = (p.smoothA ? 1 : 0) | (p.smoothB ? 2 : 0);
+			json_array_append_new(patternsJ, json_pack("[ii]", p.length, flags));
+		}
 		json_object_set_new(trackJ, "patterns", patternsJ);
+
+		json_object_set_new(trackJ, "smoothA", json_boolean(t.smoothA));
+		json_object_set_new(trackJ, "smoothB", json_boolean(t.smoothB));
+		const TrackOptions& o = t.options;
+		json_t* optionsJ = json_object();
+		json_object_set_new(optionsJ, "noteDisplayA", json_boolean(o.noteDisplayA));
+		json_object_set_new(optionsJ, "noteDisplayB", json_boolean(o.noteDisplayB));
+		json_object_set_new(optionsJ, "clockDiv", json_integer(o.clockDiv));
+		json_object_set_new(optionsJ, "clockMul", json_integer(o.clockMul));
+		json_object_set_new(optionsJ, "triggerMode", json_boolean(o.triggerMode));
+		json_object_set_new(trackJ, "options", optionsJ);
 
 		json_object_set_new(trackJ, "loopStart", json_integer(t.loopStart));
 		json_object_set_new(trackJ, "loopEnd", json_integer(t.loopEnd));
@@ -72,7 +86,19 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 		for (size_t p = 0; p < json_array_size(patternsJ); p++) {
 			if (!seq.appendPattern(ti))
 				break;
-			int len = (int) json_integer_value(json_array_get(patternsJ, p));
+			json_t* patternJ = json_array_get(patternsJ, p);
+			int len, patternFlags;
+			if (json_is_array(patternJ)) {
+				len = (int) json_integer_value(json_array_get(patternJ, 0));
+				patternFlags = (int) json_integer_value(json_array_get(patternJ, 1));
+			}
+			else {
+				// Patches from before pattern smoothing stored bare lengths.
+				len = (int) json_integer_value(patternJ);
+				patternFlags = 0;
+			}
+			t.patterns.back().smoothA = patternFlags & 1;
+			t.patterns.back().smoothB = patternFlags & 2;
 			for (int i = 0; i < len && next < json_array_size(stepsJ); i++, next++) {
 				json_t* stepJ = json_array_get(stepsJ, next);
 				auto field = [&](size_t k) {
@@ -99,6 +125,26 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 		};
 		t.loopStart = loopPoint("loopStart");
 		t.loopEnd = loopPoint("loopEnd");
+
+		t.smoothA = json_boolean_value(json_object_get(trackJ, "smoothA"));
+		t.smoothB = json_boolean_value(json_object_get(trackJ, "smoothB"));
+		t.options = TrackOptions();
+		if (json_t* optionsJ = json_object_get(trackJ, "options")) {
+			TrackOptions& o = t.options;
+			auto flag = [&](const char* key, bool def) {
+				json_t* j = json_object_get(optionsJ, key);
+				return j ? json_boolean_value(j) : def;
+			};
+			auto ratio = [&](const char* key) {
+				json_t* j = json_object_get(optionsJ, key);
+				return (uint8_t) (j ? clamp((int) json_integer_value(j), 1, MAX_VALUE) : 1);
+			};
+			o.noteDisplayA = flag("noteDisplayA", true);
+			o.noteDisplayB = flag("noteDisplayB", true);
+			o.clockDiv = ratio("clockDiv");
+			o.clockMul = ratio("clockMul");
+			o.triggerMode = flag("triggerMode", false);
+		}
 	}
 }
 

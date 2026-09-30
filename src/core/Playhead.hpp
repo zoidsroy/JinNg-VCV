@@ -1,6 +1,6 @@
 #pragma once
-// Per-track play cursor (docs/SPEC.md §3). It only counts clock pulses; turning pulses
-// into time (clock div/mul, smoothing, trigger lengths) is layered on top later.
+// Per-track play cursor (docs/SPEC.md §3). It only counts clock pulses; everything that
+// needs real time (clock div/mul, smoothing, trigger lengths) lives in Transport.
 //
 // A step lasts `duration` pulses and its gate is high for the first `gate` of them.
 // `pulse` is the pulse currently sounding within the step, or -1 when the cursor is
@@ -100,10 +100,14 @@ struct Playhead {
 		return &t.steps[step];
 	}
 
+	// The gate in gate mode (trigger mode is timed by the Transport). With ratchet on,
+	// the gate repeats high `gate` pulses, low `gate` pulses until the step ends.
 	bool gate(const Track& t) const {
 		const Step* s = current(t);
 		if (!s || armed())
 			return false;
+		if (s->ratchet && s->gate > 0 && s->gate < s->duration)
+			return pulse % (2 * s->gate) < s->gate;
 		return pulse < std::min(s->gate, s->duration);
 	}
 

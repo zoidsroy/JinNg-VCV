@@ -3,8 +3,8 @@
 // buttons. It receives press/release/turn events and edits the sequence directly, so
 // it must run on the audio thread, which is the only place the sequence changes.
 //
-// Stage 2 covers EDIT-mode editing. The MODE switch, MATH, SMOOTH, snapshots, voltage
-// table editing and track options come in later stages.
+// Covers EDIT-mode editing, SMOOTH and the track options screen. The MODE switch, MATH,
+// snapshots and voltage table editing come in later stages.
 
 #include "Editor.hpp"
 #include "Transport.hpp"
@@ -53,17 +53,17 @@ struct Clipboard {
 	enum Kind { NONE, STEPS, PATTERNS, TRACK };
 	Kind kind = NONE;
 	std::vector<Step> steps;
-	std::vector<uint8_t> lengths;
+	std::vector<Pattern> patterns;
 	Track track;
 
 	Clipboard() {
 		steps.reserve(MAX_TOTAL_STEPS);
-		lengths.reserve(MAX_PATTERNS);
+		patterns.reserve(MAX_PATTERNS);
 	}
 	void clear() {
 		kind = NONE;
 		steps.clear();
-		lengths.clear();
+		patterns.clear();
 	}
 };
 
@@ -85,7 +85,10 @@ struct PanelView {
 	Step step;
 	int index = 0;
 	float voltage = 0.f;
+	bool noteDisplay = true; // VOLTAGE as a note (Nt) or a number (Nr)
 	const char* message = nullptr;
+	bool optionsScreen = false;
+	TrackOptions options;
 };
 
 struct Panel {
@@ -104,6 +107,7 @@ struct Panel {
 	bool copyDragged = false;
 	int copyAnchor = -1;
 	bool deleteArmed = false;
+	bool optionsScreen = false;
 	const char* message = nullptr;
 	float messageTime = 0.f;
 	float time = 0.f;
@@ -128,6 +132,9 @@ struct Panel {
 			pressFocus(seq, b);
 			return;
 		}
+		// The track options screen only takes focus buttons and the encoders.
+		if (optionsScreen)
+			return;
 		switch (b) {
 			case BUTTON_INSERT:
 				insertMode = INSERT_AFTER;
@@ -145,6 +152,9 @@ struct Panel {
 			case BUTTON_LOOP_END:
 				toggleLoop(seq, false);
 				break;
+			case BUTTON_SMOOTH:
+				toggleSmooth(seq);
+				break;
 			default:
 				break;
 		}
@@ -154,6 +164,8 @@ struct Panel {
 		if (b < 0 || b >= BUTTON_LEN || !held[b])
 			return;
 		held[b] = false;
+		if (optionsScreen)
+			return;
 		switch (b) {
 			case BUTTON_INSERT:
 				doInsert(seq, tr);
@@ -169,6 +181,11 @@ struct Panel {
 	void turnLeft(Sequence& seq, int d) {
 		if (d == 0)
 			return;
+		if (optionsScreen && leftFocus == FOCUS_STEP) {
+			TrackOptions& o = seq.tracks[track].options;
+			o.clockMul = adjustRatio(o.clockMul, d);
+			return;
+		}
 		switch (leftFocus) {
 			case FOCUS_TRACK:
 				track = std::max(0, std::min(track + d, NUM_TRACKS - 1));
@@ -196,6 +213,10 @@ struct Panel {
 			return;
 		}
 		Track& t = seq.tracks[track];
+		if (optionsScreen) {
+			editOption(t.options, rightFocus, d);
+			return;
+		}
 		int pos = cursor().step;
 		if (pos < 0)
 			return;
@@ -247,6 +268,21 @@ struct Panel {
 		return clip.kind != Clipboard::NONE;
 	}
 
+	// Lit when the cursor's step is smoothed on the selected table, whether by its own
+	// flag, its pattern's or the track's.
+	bool smoothLed(const Sequence& seq) const {
+		if (table == TABLE_REF)
+			return false;
+		bool b = table == TABLE_B;
+		const Track& t = seq.tracks[track];
+		const EditCursor& c = cursors[track];
+		if (b ? t.smoothB : t.smoothA)
+			return true;
+		if (c.pattern >= 0 && (b ? t.patterns[c.pattern].smoothB : t.patterns[c.pattern].smoothA))
+			return true;
+		return c.step >= 0 && (b ? t.steps[c.step].smoothB : t.steps[c.step].smoothA);
+	}
+
 	// Loop LEDs: on when the cursor's step is the loop point. With PATTERN focused, on
 	// when the loop point is the pattern's boundary and blinking when it falls inside.
 	Led loopLed(const Sequence& seq, bool start) const {
@@ -283,7 +319,10 @@ struct Panel {
 		else {
 			v.voltage = t.tableA[0];
 		}
+		v.noteDisplay = table == TABLE_B ? t.options.noteDisplayB : t.options.noteDisplayA;
 		v.message = currentMessage();
+		v.optionsScreen = optionsScreen;
+		v.options = t.options;
 		return v;
 	}
 
@@ -336,11 +375,23 @@ private:
 
 	void pressFocus(Sequence& seq, int f) {
 		int& focus = f < NUM_LEFT_FOCUS ? leftFocus : rightFocus;
-		if (focus != f) {
-			focus = f;
+		bool focusPress = focus == f;
+		focus = f;
+
+		// A focus press on TRACK opens and closes the track options screen.
+		if (focusPress && f == FOCUS_TRACK) {
+			optionsScreen = !optionsScreen;
 			return;
 		}
-		// Pressing an already focused button ("focus press").
+		if (optionsScreen) {
+			// On the options screen the buttons beside the two-state options cycle them.
+			if (f == FOCUS_CV_A || f == FOCUS_CV_B || f == FOCUS_GATE)
+				editOption(seq.tracks[track].options, f, 1);
+			return;
+		}
+
+		if (!focusPress)
+			return;
 		if (f == FOCUS_GATE) {
 			int pos = cursor().step;
 			if (pos >= 0) {
@@ -348,6 +399,42 @@ private:
 				s.ratchet = !s.ratchet;
 			}
 		}
+	}
+
+	static uint8_t adjustRatio(uint8_t v, int d) {
+		return (uint8_t) std::max(1, std::min((int) v + d, MAX_VALUE));
+	}
+
+	// Track options screen (spec §4.8): CV-A/CV-B note or number display, DURATION the
+	// clock divider, GATE gate or trigger output. (STEP, the multiplier, is on the left.)
+	static void editOption(TrackOptions& o, int f, int d) {
+		switch (f) {
+			case FOCUS_CV_A: o.noteDisplayA = !o.noteDisplayA; break;
+			case FOCUS_CV_B: o.noteDisplayB = !o.noteDisplayB; break;
+			case FOCUS_DURATION: o.clockDiv = adjustRatio(o.clockDiv, d); break;
+			case FOCUS_GATE: o.triggerMode = !o.triggerMode; break;
+			default: break;
+		}
+	}
+
+	// SMOOTH toggles smoothing for the focused step, pattern or track, on the output the
+	// TABLE switch selects (A or B; nothing in REF).
+	void toggleSmooth(Sequence& seq) {
+		if (table == TABLE_REF)
+			return;
+		bool b = table == TABLE_B;
+		Track& t = seq.tracks[track];
+		const EditCursor& c = cursor();
+		auto flip = [b](bool& a, bool& bb) {
+			bool& flag = b ? bb : a;
+			flag = !flag;
+		};
+		if (leftFocus == FOCUS_TRACK)
+			flip(t.smoothA, t.smoothB);
+		else if (leftFocus == FOCUS_PATTERN && c.pattern >= 0)
+			flip(t.patterns[c.pattern].smoothA, t.patterns[c.pattern].smoothB);
+		else if (c.step >= 0)
+			flip(t.steps[c.step].smoothA, t.steps[c.step].smoothB);
 	}
 
 	// STEP moves through the whole track; the PATTERN display follows along.
@@ -475,8 +562,8 @@ private:
 		EditCursor& c = cursor();
 		bool before = insertMode == INSERT_BEFORE;
 		int at = c.pattern < 0 ? 0 : (before ? c.pattern : c.pattern + 1);
-		int count = (int) clip.lengths.size();
-		if (!edit::insertPatterns(seq, track, at, clip.lengths.data(), count, clip.steps.data(), ph))
+		int count = (int) clip.patterns.size();
+		if (!edit::insertPatterns(seq, track, at, clip.patterns.data(), count, clip.steps.data(), ph))
 			return false;
 		c.pattern = before ? at + count : at + count - 1;
 		c.step = -1;
@@ -548,7 +635,7 @@ private:
 			int first = edit::patternStart(t, from);
 			int end = edit::patternEnd(t, to);
 			clip.steps.assign(t.steps.begin() + first, t.steps.begin() + end);
-			clip.lengths.assign(t.patternLengths.begin() + from, t.patternLengths.begin() + to + 1);
+			clip.patterns.assign(t.patterns.begin() + from, t.patterns.begin() + to + 1);
 			clip.kind = Clipboard::PATTERNS;
 		}
 	}
