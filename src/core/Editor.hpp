@@ -183,5 +183,43 @@ inline bool transferDuration(Track& t, int pos, int d) {
 	return true;
 }
 
+// --- Rotoinversion (ER-102) ----------------------------------------------------
+// These rearrange one step parameter (see MathParam: CV-A, CV-B, DURATION, GATE)
+// across steps [first, last], leaving the other parameters where they are, so e.g. the
+// rhythm can be rotated without moving the melody.
+
+inline uint8_t& paramOf(Step& s, int param) {
+	switch (param) {
+		case MATH_CV_B: return s.cvB;
+		case MATH_DURATION: return s.duration;
+		case MATH_GATE: return s.gate;
+		default: return s.cvA;
+	}
+}
+
+// INVERT: the parameter's values in reverse order.
+inline void reverseParam(Track& t, int first, int last, int param) {
+	for (int i = first, j = last; i < j; i++, j--)
+		std::swap(paramOf(t.steps[i], param), paramOf(t.steps[j], param));
+}
+
+// ROTATE: every value moves one step later (forward) or earlier, wrapping around.
+inline void rotateParam(Track& t, int first, int last, int param, bool forward) {
+	if (first >= last)
+		return;
+	if (forward) {
+		uint8_t carry = paramOf(t.steps[last], param);
+		for (int i = last; i > first; i--)
+			paramOf(t.steps[i], param) = paramOf(t.steps[i - 1], param);
+		paramOf(t.steps[first], param) = carry;
+	}
+	else {
+		uint8_t carry = paramOf(t.steps[first], param);
+		for (int i = first; i < last; i++)
+			paramOf(t.steps[i], param) = paramOf(t.steps[i + 1], param);
+		paramOf(t.steps[last], param) = carry;
+	}
+}
+
 } // namespace edit
 } // namespace iqs

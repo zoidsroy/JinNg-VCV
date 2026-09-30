@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Patch (de)serialization of the sequence. Kept out of src/core because it uses
 // Rack's jansson.
 //
@@ -66,6 +66,10 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		for (const MathOp& op : t.math)
 			json_array_append_new(mathJ, json_pack("[ii]", op.type, op.operand));
 		json_object_set_new(trackJ, "math", mathJ);
+		json_t* transformJ = json_array();
+		for (const Transform& x : t.transform)
+			json_array_append_new(transformJ, json_pack("[iiiii]", x.add, x.geo, x.jitter, x.random, x.quantize));
+		json_object_set_new(trackJ, "transform", transformJ);
 		json_array_append_new(tracksJ, trackJ);
 	}
 	return tracksJ;
@@ -93,6 +97,19 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 			op.type = (uint8_t) clamp((int) json_integer_value(json_array_get(opJ, 0)), 0, MATH_TYPES - 1);
 			int lo = op.type == MATH_ADD || op.type == MATH_GEO ? -MAX_VALUE : 0;
 			op.operand = (int8_t) clamp((int) json_integer_value(json_array_get(opJ, 1)), lo, MAX_VALUE);
+		}
+		json_t* transformJ = json_object_get(trackJ, "transform");
+		for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(transformJ); k++) {
+			json_t* xJ = json_array_get(transformJ, k);
+			auto field = [&](size_t i, int lo, int hi) {
+				return clamp((int) json_integer_value(json_array_get(xJ, i)), lo, hi);
+			};
+			Transform& x = t.transform[k];
+			x.add = (int8_t) field(0, -MAX_VALUE, MAX_VALUE);
+			x.geo = (int8_t) field(1, -MAX_VALUE, MAX_VALUE);
+			x.jitter = (uint8_t) field(2, 0, MAX_VALUE);
+			x.random = (uint8_t) field(3, 0, MAX_VALUE);
+			x.quantize = (uint8_t) field(4, 1, MAX_VALUE);
 		}
 
 		json_t* stepsJ = json_object_get(trackJ, "steps");

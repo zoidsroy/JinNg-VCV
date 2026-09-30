@@ -9,12 +9,14 @@
 
 #include "Editor.hpp"
 #include "Math.hpp"
+#include "Transform.hpp"
 #include "Transport.hpp"
 #include "VoltageTables.hpp"
 
 namespace iqs {
 
-// Focus targets. The first five are steered by the left encoder, the rest by the right.
+// Focus targets. INDEX..SNAPSHOT (and the expander's PART and GROUP) are steered by the
+// left encoder, the others by the right.
 enum Focus {
 	FOCUS_INDEX,
 	FOCUS_TRACK,
@@ -26,9 +28,18 @@ enum Focus {
 	FOCUS_CV_B,
 	FOCUS_DURATION,
 	FOCUS_GATE,
+	// On the expander.
+	FOCUS_PART,
+	FOCUS_GROUP,
+	FOCUS_GROUP_MODIFIER,
 	FOCUS_LEN
 };
-static constexpr int NUM_LEFT_FOCUS = FOCUS_VOLTAGE;
+// The sequencer's own focus buttons (the expander adds the rest).
+static constexpr int NUM_SEQUENCER_FOCUS = FOCUS_PART;
+
+inline bool isLeftFocus(int f) {
+	return f < FOCUS_VOLTAGE || f == FOCUS_PART || f == FOCUS_GROUP;
+}
 
 // Panel buttons. The focus buttons share their Focus value.
 enum Button {
@@ -42,6 +53,14 @@ enum Button {
 	BUTTON_LOOP_END,
 	BUTTON_SMOOTH,
 	BUTTON_COMMIT,
+	// On the expander.
+	BUTTON_RESET_TO,
+	BUTTON_TRANSITION,
+	BUTTON_DESELECT,
+	BUTTON_INVERT,
+	BUTTON_ROTATE,
+	BUTTON_ARM,
+	BUTTON_PUNCH,
 	BUTTON_LEN
 };
 
@@ -99,6 +118,9 @@ struct PanelView {
 	bool mathScreen = false;
 	int mathRow = MATH_CV_A;
 	std::array<MathOp, MATH_PARAMS> math;
+	bool expander = false;        // the MATH screen shows the five-operation transform
+	TransformSet transform;
+	int transformOp[MATH_PARAMS]; // the operation shown for each parameter
 	int snapshot = 0; // filled in by the Engine: 0 is the blank snapshot "--"
 };
 
@@ -113,6 +135,7 @@ struct Panel {
 	// Set by the host every sample.
 	int mode = MODE_EDIT;
 	bool paused = false;
+	bool expander = false; // a Sequencer Controller is attached
 
 	EditCursor cursors[NUM_TRACKS];
 	Clipboard clip;
@@ -128,6 +151,10 @@ struct Panel {
 	bool optionsScreen = false;
 	bool mathPinned = false;
 	int mathRow = MATH_CV_A;
+	// With the expander: which of the five operations each parameter's display shows.
+	int transformOp[MATH_PARAMS] = {OP_ADD, OP_ADD, OP_ADD, OP_ADD};
+	// INVERT acts on release unless it was held as a modifier (for ROTATE or MATH).
+	bool invertPending = false;
 	Rng rng;
 	int browseIndex = 0; // the voltage table entry INDEX points at
 	int refTable = 0;    // the reference table picked while TABLE is on REF
@@ -160,6 +187,13 @@ struct Panel {
 			return;
 		}
 		if (mathScreen()) {
+			if (b == BUTTON_INVERT && expander) {
+				// Inverting the transform being edited.
+				Track& t = seq.tracks[track];
+				t.transform = invertedAll(t.transform);
+				held[b] = false;
+				return;
+			}
 			pressInMathScreen(seq, b);
 			return;
 		}
@@ -170,6 +204,15 @@ struct Panel {
 		// The track options screen only takes focus buttons and the encoders.
 		if (optionsScreen)
 			return;
+		if (b == BUTTON_INVERT) {
+			invertPending = true;
+			return;
+		}
+		if (b == BUTTON_ROTATE) {
+			// With INVERT held it shifts backward instead.
+			rotoinvert(seq, held[BUTTON_INVERT] ? ROTO_SHIFT_BACK : ROTO_SHIFT_FORWARD);
+			return;
+		}
 		if ((b == BUTTON_INSERT || b == BUTTON_DELETE) && refuseEdit()) {
 			held[b] = false;
 			return;
@@ -216,6 +259,12 @@ struct Panel {
 				applyMathToFocus(seq);
 			return;
 		}
+		if (b == BUTTON_INVERT) {
+			if (invertPending && !optionsScreen && !mathScreen())
+				rotoinvert(seq, ROTO_REVERSE);
+			invertPending = false;
+			return;
+		}
 		if (optionsScreen || mathScreen())
 			return;
 		switch (b) {
@@ -235,7 +284,15 @@ struct Panel {
 			return;
 		markChord();
 		if (mathScreen()) {
-			cycleMathType(seq.tracks[track].math[mathRow], d);
+			if (expander) {
+				// The LEFT knob picks which operation of the focused parameter to edit.
+				int param = rightFocus - FOCUS_CV_A;
+				if (param >= 0 && param < MATH_PARAMS)
+					transformOp[param] = ((transformOp[param] + d) % OP_LEN + OP_LEN) % OP_LEN;
+			}
+			else {
+				cycleMathType(seq.tracks[track].math[mathRow], d);
+			}
 			return;
 		}
 		if (optionsScreen && leftFocus == FOCUS_STEP) {
@@ -280,7 +337,11 @@ struct Panel {
 		Track& t = seq.tracks[track];
 		if (mathScreen()) {
 			int param = rightFocus - FOCUS_CV_A;
-			if (param >= 0 && param < MATH_PARAMS)
+			if (param < 0 || param >= MATH_PARAMS)
+				return;
+			if (expander)
+				adjustTransform(t.transform[param], transformOp[param], d);
+			else
 				adjustMathOperand(t.math[param], d);
 			return;
 		}
@@ -323,6 +384,8 @@ struct Panel {
 			if (held[f])
 				focusPressPending[f] = false;
 		}
+		if (held[BUTTON_INVERT])
+			invertPending = false;
 	}
 
 	void tick(float dt) {
@@ -385,7 +448,7 @@ struct Panel {
 		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK) ||
 		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX))
 			return LED_BLINK;
-		if (mathScreen() && f < NUM_LEFT_FOCUS)
+		if (mathScreen() && isLeftFocus(f))
 			return f == FOCUS_TRACK + mathRow ? LED_ON : LED_OFF;
 		return (f == leftFocus || f == rightFocus) ? LED_ON : LED_OFF;
 	}
@@ -456,6 +519,10 @@ struct Panel {
 		v.mathScreen = mathScreen();
 		v.mathRow = mathRow;
 		v.math = t.math;
+		v.expander = expander;
+		v.transform = t.transform;
+		for (int i = 0; i < MATH_PARAMS; i++)
+			v.transformOp[i] = transformOp[i];
 		return v;
 	}
 
@@ -526,7 +593,7 @@ private:
 	}
 
 	void pressFocus(Sequence& seq, int f) {
-		int& focus = f < NUM_LEFT_FOCUS ? leftFocus : rightFocus;
+		int& focus = isLeftFocus(f) ? leftFocus : rightFocus;
 		if (focus == f) {
 			focusPressPending[f] = true;
 		}
@@ -650,12 +717,18 @@ private:
 			return;
 		}
 		if (b == BUTTON_DELETE) {
-			t.math = std::array<MathOp, MATH_PARAMS>();
+			if (expander)
+				t.transform = TransformSet();
+			else
+				t.math = std::array<MathOp, MATH_PARAMS>();
 			return;
 		}
 		if (b >= FOCUS_TRACK && b <= FOCUS_SNAPSHOT) {
 			mathRow = b - FOCUS_TRACK;
-			cycleMathType(t.math[mathRow], 1);
+			if (expander)
+				rightFocus = FOCUS_CV_A + mathRow; // the row's parameter
+			else
+				cycleMathType(t.math[mathRow], 1);
 			return;
 		}
 		if (b >= FOCUS_CV_A && b <= FOCUS_GATE)
@@ -663,15 +736,65 @@ private:
 	}
 
 	// Transforms the focused step, pattern or whole track.
+	// With the expander the five-operation transform is applied, inverted while INVERT
+	// is held.
 	void applyMathToFocus(Sequence& seq) {
 		Track& t = seq.tracks[track];
+		int first, last;
+		if (!focusRange(t, first, last)) {
+			const EditCursor& c = cursor();
+			if (c.step < 0)
+				return;
+			first = last = c.step;
+		}
+		if (expander) {
+			if (held[BUTTON_INVERT]) {
+				invertPending = false;
+				applyTransforms(t, invertedAll(t.transform), first, last, rng);
+			}
+			else {
+				applyTransforms(t, t.transform, first, last, rng);
+			}
+		}
+		else {
+			applyMath(t, first, last, rng);
+		}
+	}
+
+	// The steps the focused PATTERN or TRACK covers; false for any other focus.
+	bool focusRange(const Track& t, int& first, int& last) {
 		const EditCursor& c = cursor();
-		if (leftFocus == FOCUS_TRACK)
-			applyMath(t, 0, t.numSteps() - 1, rng);
-		else if (leftFocus == FOCUS_PATTERN && c.pattern >= 0)
-			applyMath(t, edit::patternStart(t, c.pattern), edit::patternEnd(t, c.pattern) - 1, rng);
-		else if (c.step >= 0)
-			applyMath(t, c.step, c.step, rng);
+		if (leftFocus == FOCUS_TRACK && t.numSteps() > 0) {
+			first = 0;
+			last = t.numSteps() - 1;
+			return true;
+		}
+		if (leftFocus == FOCUS_PATTERN && c.pattern >= 0 && t.patterns[c.pattern].length > 0) {
+			first = edit::patternStart(t, c.pattern);
+			last = edit::patternEnd(t, c.pattern) - 1;
+			return true;
+		}
+		return false;
+	}
+
+	// --- Rotoinversion (expander) ------------------------------------------------
+
+	enum Roto { ROTO_REVERSE, ROTO_SHIFT_FORWARD, ROTO_SHIFT_BACK };
+
+	// INVERT / ROTATE with PATTERN or TRACK focused rearrange the focused right-hand
+	// parameter of those steps (spec ER-102 §6).
+	void rotoinvert(Sequence& seq, int op) {
+		Track& t = seq.tracks[track];
+		int param = rightFocus - FOCUS_CV_A;
+		int first, last;
+		if (param < 0 || param >= MATH_PARAMS || !focusRange(t, first, last))
+			return;
+		if (refuseEdit())
+			return;
+		if (op == ROTO_REVERSE)
+			edit::reverseParam(t, first, last, param);
+		else
+			edit::rotateParam(t, first, last, param, op == ROTO_SHIFT_FORWARD);
 	}
 
 	// --- INSERT ----------------------------------------------------------------

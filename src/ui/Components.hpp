@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include "plugin.hpp"
 #include <functional>
 
@@ -55,6 +55,7 @@ inline uint8_t glyph(char ch) {
 		case 'n': return C | E | G;
 		case 'o': return C | D | E | G;
 		case 'P': case 'p': return A | B | E | F | G;
+		case 'Q': case 'q': return A | B | C | F | G;
 		case 'r': case 'R': return E | G;
 		case 't': case 'T': return D | E | F | G;
 		case 'U': return B | C | D | E | F;

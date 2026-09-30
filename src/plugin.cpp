@@ -1,4 +1,4 @@
-﻿#include "plugin.hpp"
+#include "plugin.hpp"
 #include "Serialize.hpp"
 
 Plugin* pluginInstance;
@@ -7,6 +7,7 @@ iqs::RefTables gRefTables;
 void init(Plugin* p) {
 	pluginInstance = p;
 	p->addModel(modelIndexedQuadSeq);
+	p->addModel(modelSequencerController);
 }
 
 // Plugin-wide settings, stored by Rack in settings.json: the user reference tables.

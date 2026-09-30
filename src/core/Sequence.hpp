@@ -61,6 +61,33 @@ struct MathOp {
 // The parameters a MathOp applies to, in display order.
 enum MathParam { MATH_CV_A, MATH_CV_B, MATH_DURATION, MATH_GATE, MATH_PARAMS };
 
+// The ER-102's five-operation transform for one step parameter (see Transform.hpp for
+// how it is applied and edited).
+struct Transform {
+	int8_t add = 0;       // A (or S, the value to set, when geo == 0): -99..99
+	int8_t geo = 1;       // G: n > 0 multiplies by n, n < 0 divides by -n, 0 multiplies by zero
+	uint8_t jitter = 0;   // Jt: 0..99
+	uint8_t random = 0;   // Rd: 0..99
+	uint8_t quantize = 1; // Qt: 1..99
+
+	bool operator==(const Transform& o) const {
+		return add == o.add && geo == o.geo && jitter == o.jitter && random == o.random && quantize == o.quantize;
+	}
+	bool operator!=(const Transform& o) const {
+		return !(*this == o);
+	}
+
+	// INVERT: subtract instead of add, divide instead of multiply. Only A and G change.
+	Transform inverted() const {
+		Transform t = *this;
+		t.add = (int8_t) -add;
+		if (geo > 1 || geo < -1)
+			t.geo = (int8_t) -geo;
+		return t;
+	}
+};
+typedef std::array<Transform, MATH_PARAMS> TransformSet;
+
 struct VoltageTable {
 	std::array<float, TABLE_SIZE> volts;
 
@@ -103,6 +130,8 @@ struct Track {
 	uint8_t voltageGrain = 0;
 	// The track's prepared MATH transform, one operation per step parameter.
 	std::array<MathOp, MATH_PARAMS> math;
+	// Its five-operation counterpart, which MATH uses while the expander is connected.
+	TransformSet transform;
 
 	Track() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -126,6 +155,7 @@ struct Track {
 		tableB = o.tableB;
 		voltageGrain = o.voltageGrain;
 		math = o.math;
+		transform = o.transform;
 		return *this;
 	}
 
@@ -232,6 +262,8 @@ struct Sequence {
 				if (a.math[k].type != b.math[k].type || a.math[k].operand != b.math[k].operand)
 					return false;
 			}
+			if (a.transform != b.transform)
+				return false;
 		}
 		return true;
 	}
@@ -247,6 +279,7 @@ struct Sequence {
 			t.tableB = VoltageTable();
 			t.voltageGrain = 0;
 			t.math = std::array<MathOp, MATH_PARAMS>();
+			t.transform = TransformSet();
 		}
 	}
 };

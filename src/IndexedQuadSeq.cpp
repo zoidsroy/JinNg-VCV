@@ -1,7 +1,9 @@
 #include "plugin.hpp"
+#include "Expander.hpp"
 #include "Serialize.hpp"
 #include "core/Engine.hpp"
 #include "core/NoteFormat.hpp"
+#include "core/Transform.hpp"
 #include "core/UndoTracker.hpp"
 #include "ui/Components.hpp"
 #include <atomic>
@@ -24,16 +26,16 @@ using iqs::FOCUS_CV_B;
 using iqs::FOCUS_DURATION;
 using iqs::FOCUS_GATE;
 using iqs::FOCUS_LEN;
-using iqs::NUM_LEFT_FOCUS;
+using iqs::NUM_SEQUENCER_FOCUS;
 
-static const char* const FOCUS_NAMES[FOCUS_LEN] = {
+static const char* const FOCUS_NAMES[NUM_SEQUENCER_FOCUS] = {
 	"Index", "Track", "Pattern", "Step", "Snapshot",
 	"Voltage", "CV-A", "CV-B", "Duration", "Gate",
 };
 
 struct IndexedQuadSeq : Module {
 	enum ParamId {
-		ENUMS(FOCUS_PARAM, FOCUS_LEN),
+		ENUMS(FOCUS_PARAM, NUM_SEQUENCER_FOCUS),
 		TABLE_PARAM,
 		MODE_PARAM,
 		SMOOTH_PARAM,
@@ -62,7 +64,7 @@ struct IndexedQuadSeq : Module {
 		OUTPUTS_LEN
 	};
 	enum LightId {
-		ENUMS(FOCUS_LIGHT, FOCUS_LEN),
+		ENUMS(FOCUS_LIGHT, NUM_SEQUENCER_FOCUS),
 		VOLTAGE_GRAIN_LIGHT,
 		SMOOTH_LIGHT,
 		COPY_LIGHT,
@@ -79,9 +81,15 @@ struct IndexedQuadSeq : Module {
 
 	iqs::Engine engine;
 
-	// The param behind each iqs::Button.
-	int buttonParams[iqs::BUTTON_LEN];
+	// This panel's buttons: the Engine button and the param behind each.
+	static constexpr int NUM_OWN_BUTTONS = NUM_SEQUENCER_FOCUS + 10;
+	int ownButtons[NUM_OWN_BUTTONS];
+	int ownParams[NUM_OWN_BUTTONS];
+	// Which Engine buttons are down, from this panel or the expander.
 	bool buttonDown[iqs::BUTTON_LEN] = {};
+
+	// Buffers for what a Sequencer Controller on the right sends us.
+	expander::ToSequencer fromController[2];
 
 	dsp::BooleanTrigger pauseTrigger;
 	bool resetButtonDown = false;
@@ -125,7 +133,7 @@ struct IndexedQuadSeq : Module {
 
 	IndexedQuadSeq() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
-		for (int f = 0; f < FOCUS_LEN; f++)
+		for (int f = 0; f < NUM_SEQUENCER_FOCUS; f++)
 			configButton(FOCUS_PARAM + f, string::f("%s focus", FOCUS_NAMES[f]));
 		configSwitch(TABLE_PARAM, 0.f, 2.f, TABLE_POS_A, "Table", {"B", "Reference", "A"});
 		configSwitch(MODE_PARAM, 0.f, 2.f, MODE_POS_EDIT, "Mode", {"Follow", "Edit", "Hold"});
@@ -149,18 +157,27 @@ struct IndexedQuadSeq : Module {
 			configOutput(GATE_OUTPUT + t, string::f("Track %d gate", t + 1));
 		}
 
-		for (int f = 0; f < FOCUS_LEN; f++)
-			buttonParams[f] = FOCUS_PARAM + f;
-		buttonParams[iqs::BUTTON_INSERT] = INSERT_PARAM;
-		buttonParams[iqs::BUTTON_DELETE] = DELETE_PARAM;
-		buttonParams[iqs::BUTTON_MATH] = MATH_PARAM;
-		buttonParams[iqs::BUTTON_COPY] = COPY_PARAM;
-		buttonParams[iqs::BUTTON_LOAD] = LOAD_PARAM;
-		buttonParams[iqs::BUTTON_SAVE] = SAVE_PARAM;
-		buttonParams[iqs::BUTTON_LOOP_START] = LOOP_START_PARAM;
-		buttonParams[iqs::BUTTON_LOOP_END] = LOOP_END_PARAM;
-		buttonParams[iqs::BUTTON_SMOOTH] = SMOOTH_PARAM;
-		buttonParams[iqs::BUTTON_COMMIT] = COMMIT_PARAM;
+		int n = 0;
+		auto own = [&](int button, int param) {
+			ownButtons[n] = button;
+			ownParams[n] = param;
+			n++;
+		};
+		for (int f = 0; f < NUM_SEQUENCER_FOCUS; f++)
+			own(f, FOCUS_PARAM + f);
+		own(iqs::BUTTON_INSERT, INSERT_PARAM);
+		own(iqs::BUTTON_DELETE, DELETE_PARAM);
+		own(iqs::BUTTON_MATH, MATH_PARAM);
+		own(iqs::BUTTON_COPY, COPY_PARAM);
+		own(iqs::BUTTON_LOAD, LOAD_PARAM);
+		own(iqs::BUTTON_SAVE, SAVE_PARAM);
+		own(iqs::BUTTON_LOOP_START, LOOP_START_PARAM);
+		own(iqs::BUTTON_LOOP_END, LOOP_END_PARAM);
+		own(iqs::BUTTON_SMOOTH, SMOOTH_PARAM);
+		own(iqs::BUTTON_COMMIT, COMMIT_PARAM);
+
+		rightExpander.producerMessage = &fromController[0];
+		rightExpander.consumerMessage = &fromController[1];
 
 		displayDivider.setDivision(512);
 		engine.panel.refs = &gRefTables;
@@ -259,15 +276,22 @@ struct IndexedQuadSeq : Module {
 			baselineRequested = true;
 		}
 
-		// --- Buttons and encoders.
-		for (int b = 0; b < iqs::BUTTON_LEN; b++) {
-			bool down = params[buttonParams[b]].getValue() > 0.f;
+		// --- Buttons and encoders, ours and the expander's.
+		bool attached = rightExpander.module && rightExpander.module->model == modelSequencerController;
+		engine.setExpander(attached);
+		const expander::ToSequencer* ctrl = attached ? (const expander::ToSequencer*) rightExpander.consumerMessage : nullptr;
+		auto button = [&](int b, bool down) {
 			if (down && !buttonDown[b])
 				engine.press(b);
 			else if (!down && buttonDown[b])
 				engine.release(b);
 			buttonDown[b] = down;
-		}
+		};
+		for (int i = 0; i < NUM_OWN_BUTTONS; i++)
+			button(ownButtons[i], params[ownParams[i]].getValue() > 0.f);
+		// Unplugging the expander lets go of anything held on it.
+		for (int i = 0; i < expander::NUM_BUTTONS; i++)
+			button(expander::BUTTONS[i], ctrl && ctrl->buttons[i]);
 		engine.turnLeft(leftTurns.exchange(0));
 		engine.turnRight(rightTurns.exchange(0));
 
@@ -299,7 +323,7 @@ struct IndexedQuadSeq : Module {
 		if (displayDivider.process()) {
 			const iqs::Panel& p = engine.panel;
 			const iqs::Sequence& shown = engine.editSeq();
-			for (int f = 0; f < FOCUS_LEN; f++)
+			for (int f = 0; f < NUM_SEQUENCER_FOCUS; f++)
 				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(p.focusLed(f)));
 			lights[COPY_LIGHT].setBrightness(p.copyLed());
 			lights[SMOOTH_LIGHT].setBrightness(p.smoothLed(shown));
@@ -309,6 +333,8 @@ struct IndexedQuadSeq : Module {
 			lights[PAUSE_LIGHT].setBrightness(engine.tr.paused);
 			lights[COMMIT_LIGHT].setBrightness(ledBrightness(engine.commitLed()));
 			view = engine.view();
+			if (attached)
+				sendToController(ctrl);
 		}
 
 		editGenerationPub = engine.editGeneration;
@@ -317,6 +343,27 @@ struct IndexedQuadSeq : Module {
 			captureRequested = false;
 			captureReady = true;
 		}
+	}
+
+	static int validFocus(int f, bool left, int fallback) {
+		return (f >= 0 && f < FOCUS_LEN && iqs::isLeftFocus(f) == left) ? f : fallback;
+	}
+
+	// Lights and displays of the expander, sent at display rate.
+	void sendToController(const expander::ToSequencer* ctrl) {
+		expander::ToController* out = (expander::ToController*) rightExpander.module->leftExpander.producerMessage;
+		if (!out)
+			return;
+		const iqs::Panel& p = engine.panel;
+		for (float& l : out->lights)
+			l = 0.f;
+		out->lights[expander::LIGHT_PART_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_PART));
+		out->lights[expander::LIGHT_GROUP_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP));
+		out->lights[expander::LIGHT_MODIFIER_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP_MODIFIER));
+		out->lights[expander::LIGHT_ACTIVATE] = ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f;
+		std::snprintf(out->part, sizeof(out->part), "--");
+		std::snprintf(out->group, sizeof(out->group), "--");
+		rightExpander.module->leftExpander.requestMessageFlip();
 	}
 
 	json_t* dataToJson() override {
@@ -361,9 +408,9 @@ struct IndexedQuadSeq : Module {
 		if (json_t* j = json_object_get(rootJ, "paused"))
 			engine.tr.paused = json_boolean_value(j);
 		if (json_t* j = json_object_get(rootJ, "leftFocus"))
-			engine.panel.leftFocus = clamp((int) json_integer_value(j), 0, NUM_LEFT_FOCUS - 1);
+			engine.panel.leftFocus = validFocus((int) json_integer_value(j), true, FOCUS_TRACK);
 		if (json_t* j = json_object_get(rootJ, "rightFocus"))
-			engine.panel.rightFocus = clamp((int) json_integer_value(j), NUM_LEFT_FOCUS, FOCUS_LEN - 1);
+			engine.panel.rightFocus = validFocus((int) json_integer_value(j), false, FOCUS_CV_A);
 		if (json_t* j = json_object_get(rootJ, "selectedTrack"))
 			engine.panel.track = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
 		engine.liveReplaced();
@@ -492,6 +539,8 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 	std::function<std::string()> leftRow(int r, std::string fallback, std::function<std::string(const iqs::PanelView&)> normal,
 	                                     std::function<std::string(const iqs::PanelView&)> option = nullptr) {
 		return fromView(fallback, [r, normal, option](const iqs::PanelView& v) {
+			if (v.mathScreen && v.expander)
+				return std::string(iqs::transformCode(v.transform[r], v.transformOp[r]));
 			if (v.mathScreen)
 				return std::string(iqs::mathCode(v.math[r]));
 			if (v.optionsScreen && option)
@@ -505,6 +554,8 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 	std::function<std::string()> rightRow(int r, std::function<std::string(const iqs::Step&)> field,
 	                                      std::function<std::string(const iqs::TrackOptions&)> option) {
 		return fromView("--", [r, field, option](const iqs::PanelView& v) {
+			if (v.mathScreen && v.expander)
+				return std::to_string(iqs::transformValue(v.transform[r], v.transformOp[r]));
 			if (v.mathScreen)
 				return std::to_string(std::abs((int) v.math[r].operand));
 			if (v.optionsScreen)

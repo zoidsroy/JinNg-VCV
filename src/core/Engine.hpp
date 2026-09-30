@@ -55,6 +55,12 @@ struct Engine {
 		return mode == MODE_HOLD ? shadow : live;
 	}
 
+	// Whether a Sequencer Controller expander is attached. Its buttons arrive through the
+	// same press()/release(), and MATH switches to the five-operation transform.
+	void setExpander(bool attached) {
+		panel.expander = attached;
+	}
+
 	// After `live` was replaced wholesale (patch load, demo, clear).
 	void liveReplaced() {
 		tr.rewind(live, false);

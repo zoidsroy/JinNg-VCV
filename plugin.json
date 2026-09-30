@@ -17,7 +17,19 @@
       "slug": "IndexedQuadSeq",
       "name": "Indexed Quad Sequencer",
       "description": "4-track indexed step sequencer inspired by the ER-101",
-      "tags": ["Sequencer", "Clock modulator"]
+      "tags": [
+        "Sequencer",
+        "Clock modulator"
+      ]
+    },
+    {
+      "slug": "SequencerController",
+      "name": "Sequencer Controller",
+      "description": "Expander for the Indexed Quad Sequencer: parts, groups, recording (ER-102 inspired)",
+      "tags": [
+        "Expander",
+        "Sequencer"
+      ]
     }
   ]
 }
