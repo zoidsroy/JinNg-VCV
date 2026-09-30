@@ -11,7 +11,7 @@
    ```bash
    pacman -Syu
    # 重新開啟 shell 後：
-   pacman -Syu git wget make tar unzip zip mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake autoconf automake libtool mingw-w64-x86_64-jq python zstd mingw-w64-x86_64-pkgconf
+   pacman -Syu git wget make tar unzip zip mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake autoconf automake libtool jq python zstd mingw-w64-x86_64-pkgconf
    ```
 2. 下載 [Rack SDK（Windows x64）](https://vcvrack.com/downloads/Rack-SDK-latest-win-x64.zip)，解壓縮到 `C:\GitWorkspace\Rack-SDK`。
 3. 在 MINGW64 shell 中：
