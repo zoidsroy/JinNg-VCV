@@ -1,95 +1,15 @@
-﻿// Unit tests for src/core. Built and run by `make test`; no Rack required.
+﻿// Tests for the sequence model, playback, transport and note formatting.
 
 #include "Sequence.hpp"
 #include "Playhead.hpp"
 #include "NoteFormat.hpp"
 #include "Transport.hpp"
 
+#include "testing.hpp"
+
 #include <cmath>
-#include <cstdio>
-#include <functional>
-#include <string>
-#include <vector>
 
 using namespace iqs;
-
-static int failures = 0;
-static int checks = 0;
-
-#define CHECK(cond) \
-	do { \
-		checks++; \
-		if (!(cond)) { \
-			failures++; \
-			std::printf("  FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond); \
-		} \
-	} while (0)
-
-#define CHECK_EQ(a, b) \
-	do { \
-		checks++; \
-		auto _a = (a); \
-		auto _b = (b); \
-		if (!(_a == _b)) { \
-			failures++; \
-			std::printf("  FAIL %s:%d: %s == %s\n    got:      %s\n    expected: %s\n", __FILE__, __LINE__, #a, #b, \
-			            toString(_a).c_str(), toString(_b).c_str()); \
-		} \
-	} while (0)
-
-static std::string toString(const std::string& s) { return "\"" + s + "\""; }
-static std::string toString(int v) { return std::to_string(v); }
-
-struct TestCase {
-	const char* name;
-	std::function<void()> fn;
-};
-static std::vector<TestCase>& registry() {
-	static std::vector<TestCase> r;
-	return r;
-}
-struct Register {
-	Register(const char* name, std::function<void()> fn) { registry().push_back({name, fn}); }
-};
-#define TEST(name) \
-	static void name(); \
-	static Register reg_##name(#name, name); \
-	static void name()
-
-// --- Helpers ---------------------------------------------------------------
-
-static Step makeStep(int cvA, int duration, int gate) {
-	Step s;
-	s.cvA = (uint8_t) cvA;
-	s.duration = (uint8_t) duration;
-	s.gate = (uint8_t) gate;
-	return s;
-}
-
-// Builds track 0 from (cvA, duration, gate) triples, all in one pattern.
-static Sequence build(std::initializer_list<std::array<int, 3>> steps) {
-	Sequence seq;
-	for (const auto& s : steps)
-		seq.appendStep(0, makeStep(s[0], s[1], s[2]));
-	return seq;
-}
-
-// Clocks the playhead `pulses` times and records, per pulse, which step is playing
-// ("-" when armed or stalled) and whether its gate is high ("^" high, "_" low).
-static std::string run(const Track& t, Playhead& ph, int pulses) {
-	std::string out;
-	for (int i = 0; i < pulses; i++) {
-		ph.clock(t);
-		if (ph.armed())
-			out += "-_";
-		else
-			out += std::to_string(ph.step) + (ph.gate(t) ? "^" : "_");
-		out += ' ';
-	}
-	if (!out.empty())
-		out.pop_back();
-	return out;
-}
 
 // --- Data model ------------------------------------------------------------
 
@@ -456,16 +376,4 @@ TEST(note_format_examples_from_manual) {
 TEST(voltage_format) {
 	CHECK_EQ(formatVoltage(1.f), std::string("1.000"));
 	CHECK_EQ(formatVoltage(8.192f), std::string("8.192"));
-}
-
-// ---------------------------------------------------------------------------
-
-int main() {
-	for (const TestCase& t : registry()) {
-		int before = failures;
-		t.fn();
-		std::printf("%s %s\n", failures == before ? "ok  " : "FAIL", t.name);
-	}
-	std::printf("\n%d checks, %d failures\n", checks, failures);
-	return failures == 0 ? 0 : 1;
 }

@@ -169,6 +169,17 @@ Module
   - 剪貼簿裡是 step，但 focus 在 PATTERN 時，INSERT 會插入新的空 pattern，而不是貼上；反之亦然。
   - 複製 track 會連同軌道選項一起複製。
 - DURATION 的 swing（移動 step 邊界）：按住 DURATION 按鈕轉右旋鈕，這個 step 增加的 pulse 數會從下一個 step 扣掉，兩者總和不變。
+- **[已實作，階段 2]** 以下是手冊沒寫清楚、先做的決定（`src/core/Panel.hpp`、`src/core/Editor.hpp`）：
+  - **新 step 的內容**：手冊的初始值說明（duration=0）和 Quick Start 第 8 步（「會附加一個複製的 step」）互相矛盾。目前的做法：游標在某個 step 上時複製它，游標沒有 step 時（空的 pattern 或空的軌道）才用初始值。
+  - **分割 pattern**：游標所在的 step 成為後半段的第一步。
+  - **貼上後游標的位置**：往後貼時，游標移到最後一個貼上的項目，所以連按 INSERT 會一直往後接；往前貼時，游標留在原本的項目上。
+  - **清空整軌**：第一次按 DELETE，VOLTAGE 顯示 `CLr` 等待確認；按其他鍵取消，顯示 `Abrt`，而且這個按鍵放開時不會再觸發它自己的動作。
+  - **超過上限**：插入或貼上會超過上限時不做任何修改，VOLTAGE 顯示 `FULL` 一秒。
+  - **邊編輯邊播放**：
+    - 在正在播放的 step 前面插入時，播放游標會跟著後移，繼續播同一個 step。
+    - 刪除正在播放的 step 時，由接替它位置的 step 繼續播，已經累積的 pulse 數沿用，節奏不會亂掉。
+  - **loop 點**：插入或刪除時，loop 點會跟著它原本指向的 step 移動。loop 點所在的 step 被刪除時，那個 loop 點會被清除（回答了第 7 章的第 6 題）。
+  - **顯示**：TRACK、PATTERN、STEP 都從 1 開始算，STEP 是 pattern 內的第幾步。GATE 在 ratchet 開啟時，兩個小數點會亮。
 
 ### 4.5 電壓表操作
 - TABLE 開關選 A 或 B：INDEX 顯示為索引 0–99（左旋鈕），VOLTAGE 顯示該索引的電壓。focus 在 VOLTAGE 時可以用右旋鈕修改電壓。
@@ -274,7 +285,7 @@ src/
 3. 連續 legato step 之間 gate 是否會中斷？（3.2）
 4. Trigger 模式加 ratchet 時，多次觸發的時間分布方式。（3.3）
 5. 除頻與倍頻同時設定時的處理順序。（3.6）
-6. 刪除 loop 點所在的 step 時，loop 點怎麼處理。（3.8）
+6. 刪除 loop 點所在的 step 時，loop 點怎麼處理。（3.8）→ 目前的做法是清除該 loop 點。
 7. 內建參考表 22JT、BLUE、PEnt、E-8、LE-8 的精確數值；12ET 中超過 8.192V 的索引。（2）
 8. 「量化」math 運算是否存在於 v2.09 韌體。（4.6）
 9. TRACK 的 focus 按下，到底是顯示總 pulse 數還是進入軌道選項。（4.2）

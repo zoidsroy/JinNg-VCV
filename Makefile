@@ -1,4 +1,4 @@
-RACK_DIR ?= ../Rack-SDK
+﻿RACK_DIR ?= ../Rack-SDK
 
 FLAGS += -Isrc
 CFLAGS +=
@@ -17,6 +17,6 @@ include $(RACK_DIR)/plugin.mk
 test: build/test_core
 	./build/test_core
 
-build/test_core: tests/test_core.cpp $(wildcard src/core/*.hpp)
+build/test_core: $(wildcard tests/*.cpp tests/*.hpp src/core/*.hpp)
 	@mkdir -p build
-	$(CXX) -std=c++11 -Wall -Wextra -O1 -g -Isrc/core -o $@ $<
+	$(CXX) -std=c++11 -Wall -Wextra -O1 -g -Isrc/core -Itests -o $@ $(wildcard tests/*.cpp)

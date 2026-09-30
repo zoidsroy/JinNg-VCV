@@ -1,33 +1,30 @@
 ﻿#include "plugin.hpp"
 #include "Serialize.hpp"
 #include "core/NoteFormat.hpp"
-#include "core/Playhead.hpp"
+#include "core/Panel.hpp"
 #include "core/Sequence.hpp"
 #include "core/Transport.hpp"
 #include "ui/Components.hpp"
 #include <atomic>
 
-// Stage 1: the playback engine (src/core) drives the outputs. There is no editor yet,
-// so sequences come from the context menu's demo or from a saved patch. The displays
-// follow the play cursor of the selected track.
+// Stage 2: the panel edits the sequence in EDIT mode (src/core/Panel.hpp) while the
+// engine plays it. All panel input is handled on the audio thread (buttons are params,
+// encoder turns arrive through atomics), so the audio thread is the only writer of the
+// sequence and no locking is needed.
 
 using iqs::NUM_TRACKS;
-
-// Focus targets. The first five are steered by the left encoder, the rest by the right.
-enum Focus {
-	FOCUS_INDEX,
-	FOCUS_TRACK,
-	FOCUS_PATTERN,
-	FOCUS_STEP,
-	FOCUS_SNAPSHOT,
-	FOCUS_VOLTAGE,
-	FOCUS_CV_A,
-	FOCUS_CV_B,
-	FOCUS_DURATION,
-	FOCUS_GATE,
-	FOCUS_LEN
-};
-static constexpr int NUM_LEFT_FOCUS = FOCUS_VOLTAGE;
+using iqs::FOCUS_INDEX;
+using iqs::FOCUS_TRACK;
+using iqs::FOCUS_PATTERN;
+using iqs::FOCUS_STEP;
+using iqs::FOCUS_SNAPSHOT;
+using iqs::FOCUS_VOLTAGE;
+using iqs::FOCUS_CV_A;
+using iqs::FOCUS_CV_B;
+using iqs::FOCUS_DURATION;
+using iqs::FOCUS_GATE;
+using iqs::FOCUS_LEN;
+using iqs::NUM_LEFT_FOCUS;
 
 static const char* const FOCUS_NAMES[FOCUS_LEN] = {
 	"Index", "Track", "Pattern", "Step", "Snapshot",
@@ -78,25 +75,17 @@ struct IndexedQuadSeq : Module {
 	};
 
 	// Switch positions, matching CKSSThree's frames (0 = handle down).
-	enum TablePos { TABLE_B, TABLE_REF, TABLE_A };
+	enum TablePos { TABLE_POS_B, TABLE_POS_REF, TABLE_POS_A };
 	enum ModePos { MODE_FOLLOW, MODE_EDIT, MODE_HOLD };
-
-	// Values the displays show, published by the engine for the UI thread.
-	struct DisplayState {
-		bool hasSteps = false;
-		int pattern = 0;
-		int step = 0;
-		int cvA = 0;
-		int cvB = 0;
-		int duration = 0;
-		int gate = 0;
-		float voltage = 0.f;
-	};
 
 	iqs::Sequence seq;
 	iqs::Transport transport;
+	iqs::Panel panel;
 
-	dsp::BooleanTrigger focusTriggers[FOCUS_LEN];
+	// The param behind each iqs::Button.
+	int buttonParams[iqs::BUTTON_LEN];
+	bool buttonDown[iqs::BUTTON_LEN] = {};
+
 	dsp::BooleanTrigger pauseTrigger;
 	dsp::BooleanTrigger resetButtonTrigger;
 	dsp::SchmittTrigger clockTrigger;
@@ -109,16 +98,14 @@ struct IndexedQuadSeq : Module {
 	std::atomic<bool> loadDemoRequested{false};
 	std::atomic<bool> clearRequested{false};
 
-	int leftFocus = FOCUS_TRACK;
-	int rightFocus = FOCUS_CV_A;
-	int selectedTrack = 0;
-	DisplayState display;
+	// Published by process() for the displays.
+	iqs::PanelView view;
 
 	IndexedQuadSeq() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 		for (int f = 0; f < FOCUS_LEN; f++)
 			configButton(FOCUS_PARAM + f, string::f("%s focus", FOCUS_NAMES[f]));
-		configSwitch(TABLE_PARAM, 0.f, 2.f, TABLE_A, "Table", {"B", "Reference", "A"});
+		configSwitch(TABLE_PARAM, 0.f, 2.f, TABLE_POS_A, "Table", {"B", "Reference", "A"});
 		configSwitch(MODE_PARAM, 0.f, 2.f, MODE_EDIT, "Mode", {"Follow", "Edit", "Hold"});
 		configButton(SMOOTH_PARAM, "Smooth");
 		configButton(INSERT_PARAM, "Insert");
@@ -139,24 +126,41 @@ struct IndexedQuadSeq : Module {
 			configOutput(CV_B_OUTPUT + t, string::f("Track %d CV-B", t + 1));
 			configOutput(GATE_OUTPUT + t, string::f("Track %d gate", t + 1));
 		}
+
+		for (int f = 0; f < FOCUS_LEN; f++)
+			buttonParams[f] = FOCUS_PARAM + f;
+		buttonParams[iqs::BUTTON_INSERT] = INSERT_PARAM;
+		buttonParams[iqs::BUTTON_DELETE] = DELETE_PARAM;
+		buttonParams[iqs::BUTTON_MATH] = MATH_PARAM;
+		buttonParams[iqs::BUTTON_COPY] = COPY_PARAM;
+		buttonParams[iqs::BUTTON_LOAD] = LOAD_PARAM;
+		buttonParams[iqs::BUTTON_SAVE] = SAVE_PARAM;
+		buttonParams[iqs::BUTTON_LOOP_START] = LOOP_START_PARAM;
+		buttonParams[iqs::BUTTON_LOOP_END] = LOOP_END_PARAM;
+		buttonParams[iqs::BUTTON_SMOOTH] = SMOOTH_PARAM;
+		buttonParams[iqs::BUTTON_COMMIT] = COMMIT_PARAM;
+
 		displayDivider.setDivision(512);
 	}
 
 	void onReset() override {
-		leftFocus = FOCUS_TRACK;
-		rightFocus = FOCUS_CV_A;
-		selectedTrack = 0;
-		transport.paused = false;
 		for (int t = 0; t < NUM_TRACKS; t++)
 			seq.clearTrack(t);
-		rewind(false);
+		panel.leftFocus = FOCUS_TRACK;
+		panel.rightFocus = FOCUS_CV_A;
+		panel.track = 0;
+		panel.clip.clear();
+		transport.paused = false;
+		sequenceReplaced();
 	}
 
-	void rewind(bool immediate) {
-		transport.rewind(seq, immediate);
+	// After the whole sequence was swapped out (load, demo, clear).
+	void sequenceReplaced() {
+		transport.rewind(seq, false);
+		panel.normalizeCursors(seq);
 	}
 
-	// A short four-track example so stage 1 can be heard before the editor exists.
+	// A short four-track example to play with.
 	void loadDemo() {
 		for (int t = 0; t < NUM_TRACKS; t++)
 			seq.clearTrack(t);
@@ -190,24 +194,13 @@ struct IndexedQuadSeq : Module {
 		seq.appendStep(3, step(45, 24, 4, 2));
 		seq.tracks[3].loopStart = 1;
 		seq.tracks[3].loopEnd = 2;
-		rewind(false);
+		sequenceReplaced();
 	}
 
-	void publishDisplay() {
-		const iqs::Track& t = seq.tracks[selectedTrack];
-		const iqs::Playhead& ph = transport.playheads[selectedTrack];
-		DisplayState d;
-		const iqs::Step* s = ph.current(t);
-		if (s) {
-			d.hasSteps = true;
-			t.locate(ph.step, d.pattern, d.step);
-			d.cvA = s->cvA;
-			d.cvB = s->cvB;
-			d.duration = s->duration;
-			d.gate = s->gate;
-			d.voltage = t.tableA[s->cvA];
-		}
-		display = d;
+	float ledBrightness(iqs::Led led) {
+		if (led == iqs::LED_BLINK)
+			return panel.blinkPhase() ? 1.f : 0.f;
+		return led == iqs::LED_ON ? 1.f : 0.f;
 	}
 
 	void process(const ProcessArgs& args) override {
@@ -216,28 +209,28 @@ struct IndexedQuadSeq : Module {
 		if (loadDemoRequested.exchange(false))
 			loadDemo();
 
-		for (int f = 0; f < FOCUS_LEN; f++) {
-			if (focusTriggers[f].process(params[FOCUS_PARAM + f].getValue() > 0.f)) {
-				if (f < NUM_LEFT_FOCUS)
-					leftFocus = f;
-				else
-					rightFocus = f;
-			}
+		// --- Panel input.
+		switch ((int) params[TABLE_PARAM].getValue()) {
+			case TABLE_POS_B: panel.table = iqs::TABLE_B; break;
+			case TABLE_POS_REF: panel.table = iqs::TABLE_REF; break;
+			default: panel.table = iqs::TABLE_A; break;
 		}
-
-		int left = leftTurns.exchange(0);
-		if (left != 0 && leftFocus == FOCUS_TRACK)
-			selectedTrack = clamp(selectedTrack + left, 0, NUM_TRACKS - 1);
-		rightTurns.exchange(0);
+		for (int b = 0; b < iqs::BUTTON_LEN; b++) {
+			bool down = params[buttonParams[b]].getValue() > 0.f;
+			if (down && !buttonDown[b])
+				panel.press(seq, transport, b);
+			else if (!down && buttonDown[b])
+				panel.release(seq, transport, b);
+			buttonDown[b] = down;
+		}
+		panel.turnLeft(seq, leftTurns.exchange(0));
+		panel.turnRight(seq, rightTurns.exchange(0));
+		panel.tick(args.sampleTime);
 
 		if (pauseTrigger.process(params[PAUSE_PARAM].getValue() > 0.f))
 			transport.paused = !transport.paused;
 
-		for (int f = 0; f < FOCUS_LEN; f++)
-			lights[FOCUS_LIGHT + f].setBrightness(f == leftFocus || f == rightFocus);
-		lights[PAUSE_LIGHT].setBrightness(transport.paused);
-
-		// RESET (input or button). While it is held high the sequencer stays parked.
+		// --- Transport. RESET (input or button) held high keeps the sequencer parked.
 		bool resetButton = params[RESET_PARAM].getValue() > 0.f;
 		bool resetEdge = resetTrigger.process(inputs[RESET_INPUT].getVoltage(), 0.1f, 2.f);
 		resetEdge |= resetButtonTrigger.process(resetButton);
@@ -253,8 +246,16 @@ struct IndexedQuadSeq : Module {
 			outputs[GATE_OUTPUT + t].setVoltage(transport.gate(seq, t) ? 10.f : 0.f);
 		}
 
-		if (displayDivider.process())
-			publishDisplay();
+		// --- Lights and displays.
+		if (displayDivider.process()) {
+			for (int f = 0; f < FOCUS_LEN; f++)
+				lights[FOCUS_LIGHT + f].setBrightness(ledBrightness(panel.focusLed(f)));
+			lights[COPY_LIGHT].setBrightness(panel.copyLed());
+			lights[LOOP_START_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, true)));
+			lights[LOOP_END_LIGHT].setBrightness(ledBrightness(panel.loopLed(seq, false)));
+			lights[PAUSE_LIGHT].setBrightness(transport.paused);
+			view = panel.view(seq);
+		}
 	}
 
 	json_t* dataToJson() override {
@@ -262,25 +263,25 @@ struct IndexedQuadSeq : Module {
 		json_object_set_new(rootJ, "sequence", iqs::sequenceToJson(seq));
 		json_object_set_new(rootJ, "resetMode", json_integer(transport.resetMode));
 		json_object_set_new(rootJ, "paused", json_boolean(transport.paused));
-		json_object_set_new(rootJ, "leftFocus", json_integer(leftFocus));
-		json_object_set_new(rootJ, "rightFocus", json_integer(rightFocus));
-		json_object_set_new(rootJ, "selectedTrack", json_integer(selectedTrack));
+		json_object_set_new(rootJ, "leftFocus", json_integer(panel.leftFocus));
+		json_object_set_new(rootJ, "rightFocus", json_integer(panel.rightFocus));
+		json_object_set_new(rootJ, "selectedTrack", json_integer(panel.track));
 		return rootJ;
 	}
 
 	void dataFromJson(json_t* rootJ) override {
 		iqs::sequenceFromJson(seq, json_object_get(rootJ, "sequence"));
-		rewind(false);
 		if (json_t* j = json_object_get(rootJ, "resetMode"))
 			transport.resetMode = clamp((int) json_integer_value(j), 0, (int) iqs::RESET_STARTS_FIRST_STEP);
 		if (json_t* j = json_object_get(rootJ, "paused"))
 			transport.paused = json_boolean_value(j);
 		if (json_t* j = json_object_get(rootJ, "leftFocus"))
-			leftFocus = clamp((int) json_integer_value(j), 0, NUM_LEFT_FOCUS - 1);
+			panel.leftFocus = clamp((int) json_integer_value(j), 0, NUM_LEFT_FOCUS - 1);
 		if (json_t* j = json_object_get(rootJ, "rightFocus"))
-			rightFocus = clamp((int) json_integer_value(j), NUM_LEFT_FOCUS, FOCUS_LEN - 1);
+			panel.rightFocus = clamp((int) json_integer_value(j), NUM_LEFT_FOCUS, FOCUS_LEN - 1);
 		if (json_t* j = json_object_get(rootJ, "selectedTrack"))
-			selectedTrack = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
+			panel.track = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
+		sequenceReplaced();
 	}
 };
 
@@ -337,17 +338,23 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		return d;
 	}
 
-	// Text for a display that shows a field of the playing step, or `empty` when the
-	// selected track has no steps (or in the module browser).
-	std::function<std::string()> showWhenPlaying(std::string empty,
-	                                             std::function<std::string(const IndexedQuadSeq::DisplayState&)> field) {
+	// Text for a display, computed from the view the engine last published. In the
+	// module browser (no module) the display shows `fallback`.
+	std::function<std::string()> fromView(std::string fallback, std::function<std::string(const iqs::PanelView&)> text) {
 		IndexedQuadSeq* m = seq;
-		return [m, empty, field]() {
+		return [m, fallback, text]() {
 			if (!m)
-				return empty;
-			IndexedQuadSeq::DisplayState d = m->display;
-			return d.hasSteps ? field(d) : empty;
+				return fallback;
+			iqs::PanelView v = m->view;
+			return text(v);
 		};
+	}
+
+	// A step field for a 2-digit display, or "--" when the cursor has no step.
+	std::function<std::string()> stepField(std::function<int(const iqs::Step&)> field) {
+		return fromView("--", [field](const iqs::PanelView& v) {
+			return v.stepInPattern >= 0 ? std::to_string(field(v.step)) : std::string("--");
+		});
 	}
 
 	void appendContextMenu(Menu* menu) override {
@@ -358,7 +365,7 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 			[m]() { return m->transport.resetMode; },
 			[m](int mode) { m->transport.resetMode = mode; }));
 		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("Stage 1 testing"));
+		menu->addChild(createMenuLabel("Testing"));
 		menu->addChild(createMenuItem("Load demo sequence", "", [m]() { m->loadDemoRequested = true; }));
 		menu->addChild(createMenuItem("Clear all tracks", "", [m]() { m->clearRequested = true; }));
 	}
@@ -396,17 +403,18 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addParam(createParamCentered<BlueButton>(mm2px(Vec(FN_COL_2, ROW_TOP)), module, IndexedQuadSeq::SMOOTH_PARAM));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(37.2f, ROW_TOP)), module, IndexedQuadSeq::SMOOTH_LIGHT));
 
-		// Stage 1: INDEX/VOLTAGE show the playing step's CV-A table entry.
-		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0", showWhenPlaying("0", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.cvA);
+		// INDEX and VOLTAGE show the cursor step's entry in the table the TABLE switch picks;
+		// VOLTAGE also shows the panel's messages (AFtr, FULL, ...).
+		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0", fromView("0", [](const iqs::PanelView& v) {
+			return std::to_string(v.index);
 		}));
 		addFocus(FOCUS_INDEX, L_BUTTON_X, L_LED_X, ROW_TOP);
 
 		addParam(createParamCentered<GrayButton>(mm2px(Vec(R_BUTTON_X, ROW_TOP)), module, IndexedQuadSeq::FOCUS_PARAM + FOCUS_VOLTAGE));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP - 2.3f)), module, IndexedQuadSeq::VOLTAGE_FINE_LIGHT));
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(R_LED_X, ROW_TOP + 2.3f)), module, IndexedQuadSeq::VOLTAGE_COARSE_LIGHT));
-		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", showWhenPlaying("0.C.00", [](const IndexedQuadSeq::DisplayState& d) {
-			return iqs::formatNote(d.voltage);
+		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", fromView("0.C.00", [](const iqs::PanelView& v) {
+			return v.message ? std::string(v.message) : iqs::formatNote(v.voltage);
 		}));
 
 		// --- Display grid.
@@ -416,28 +424,28 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 			addFocus(leftFocus[r], L_BUTTON_X, L_LED_X, ROWS[r]);
 			addFocus(rightFocus[r], R_BUTTON_X, R_LED_X, ROWS[r]);
 		}
-		addDisplay(L_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "1", [module]() {
-			return module ? std::to_string(module->selectedTrack + 1) : std::string("1");
-		});
-		// Patterns and steps count from 1, as in the manual.
-		addDisplay(L_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.pattern + 1);
+		// Tracks, patterns and steps count from 1, as in the manual.
+		addDisplay(L_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "1", fromView("1", [](const iqs::PanelView& v) {
+			return std::to_string(v.track + 1);
 		}));
-		addDisplay(L_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.step + 1);
+		addDisplay(L_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
+			return v.pattern >= 0 ? std::to_string(v.pattern + 1) : std::string("--");
+		}));
+		addDisplay(L_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
+			return v.stepInPattern >= 0 ? std::to_string(v.stepInPattern + 1) : std::string("--");
 		}));
 		addDisplay(L_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "1");
-		addDisplay(R_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.cvA);
-		}));
-		addDisplay(R_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.cvB);
-		}));
-		addDisplay(R_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.duration);
-		}));
-		addDisplay(R_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "--", showWhenPlaying("--", [](const IndexedQuadSeq::DisplayState& d) {
-			return std::to_string(d.gate);
+		addDisplay(R_DISPLAY_X, ROWS[0], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvA; }));
+		addDisplay(R_DISPLAY_X, ROWS[1], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.cvB; }));
+		addDisplay(R_DISPLAY_X, ROWS[2], DISPLAY_W, 2, "--", stepField([](const iqs::Step& s) { return (int) s.duration; }));
+		// GATE lights both decimal points when the step ratchets.
+		addDisplay(R_DISPLAY_X, ROWS[3], DISPLAY_W, 2, "--", fromView("--", [](const iqs::PanelView& v) {
+			if (v.stepInPattern < 0)
+				return std::string("--");
+			std::string digits = string::f("%2d", (int) v.step.gate);
+			if (!v.step.ratchet)
+				return digits;
+			return std::string(1, digits[0]) + "." + digits[1] + ".";
 		}));
 
 		// --- Encoders.
