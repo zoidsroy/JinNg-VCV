@@ -200,6 +200,42 @@ struct Sequence {
 		t.smoothB = false;
 	}
 
+	// Whether two sequences hold the same music (steps, patterns, loops, flags, options,
+	// tables, math). Used to tell whether a burst of panel activity changed anything.
+	bool sameContent(const Sequence& o) const {
+		for (int i = 0; i < NUM_TRACKS; i++) {
+			const Track& a = tracks[i];
+			const Track& b = o.tracks[i];
+			if (a.steps.size() != b.steps.size() || a.patterns.size() != b.patterns.size())
+				return false;
+			for (size_t k = 0; k < a.steps.size(); k++) {
+				const Step& s = a.steps[k];
+				const Step& t = b.steps[k];
+				if (s.cvA != t.cvA || s.cvB != t.cvB || s.duration != t.duration || s.gate != t.gate ||
+				    s.smoothA != t.smoothA || s.smoothB != t.smoothB || s.ratchet != t.ratchet)
+					return false;
+			}
+			for (size_t k = 0; k < a.patterns.size(); k++) {
+				const Pattern& p = a.patterns[k];
+				const Pattern& q = b.patterns[k];
+				if (p.length != q.length || p.smoothA != q.smoothA || p.smoothB != q.smoothB)
+					return false;
+			}
+			const TrackOptions& x = a.options;
+			const TrackOptions& y = b.options;
+			if (a.loopStart != b.loopStart || a.loopEnd != b.loopEnd || a.smoothA != b.smoothA ||
+			    a.smoothB != b.smoothB || a.voltageGrain != b.voltageGrain || x.noteDisplayA != y.noteDisplayA ||
+			    x.noteDisplayB != y.noteDisplayB || x.clockDiv != y.clockDiv || x.clockMul != y.clockMul ||
+			    x.triggerMode != y.triggerMode || a.tableA.volts != b.tableA.volts || a.tableB.volts != b.tableB.volts)
+				return false;
+			for (int k = 0; k < MATH_PARAMS; k++) {
+				if (a.math[k].type != b.math[k].type || a.math[k].operand != b.math[k].operand)
+					return false;
+			}
+		}
+		return true;
+	}
+
 	// Back to a fresh state: no steps, default tables, options and math. Unlike
 	// assigning a new Sequence this does not allocate.
 	void clearAll() {

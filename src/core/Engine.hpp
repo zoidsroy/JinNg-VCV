@@ -32,6 +32,11 @@ struct Engine {
 	int snapshotSlot = 1; // 0 is the blank snapshot "--", 1..16 the saved ones
 	int snapshotArmed = SNAP_NONE;
 
+	// Bumped by anything that may have changed the edited sequence, so the host can tell
+	// when to take an undo snapshot. Panel activity that changes nothing bumps it too;
+	// the host compares contents before recording a step.
+	uint32_t editGeneration = 0;
+
 	int mode = MODE_EDIT;
 	int pendingCommit = Q_NONE;
 	int commitTrack = 0;
@@ -76,7 +81,20 @@ struct Engine {
 
 	// --- Panel events ----------------------------------------------------------
 
+	// Undo/redo: puts back an earlier state of the edited sequence (live, or the shadow in
+	// HOLD). Play cursors stay where they are when they still fit; edit cursors keep their
+	// place where possible.
+	void restoreEdited(const Sequence& s) {
+		Sequence& target = editSeq();
+		target = s;
+		Transport& t = editTr();
+		for (int i = 0; i < NUM_TRACKS; i++)
+			t.playheads[i].validate(target.tracks[i]);
+		panel.normalizeCursors(target);
+	}
+
 	void press(int b) {
+		editGeneration++;
 		// LOAD / SAVE ask for a second press ("Abrt" flashes meanwhile); anything else
 		// cancels.
 		if (snapshotArmed != SNAP_NONE) {
@@ -109,11 +127,15 @@ struct Engine {
 	}
 
 	void release(int b) {
+		editGeneration++;
 		panel.release(editSeq(), editTr(), b);
 	}
 
 	void turnLeft(int d) {
-		if (d != 0 && panel.leftFocus == FOCUS_SNAPSHOT && !panel.mathScreen() && !panel.optionsScreen) {
+		if (d == 0)
+			return;
+		editGeneration++;
+		if (panel.leftFocus == FOCUS_SNAPSHOT && !panel.mathScreen() && !panel.optionsScreen) {
 			panel.markChord();
 			snapshotSlot = std::max(0, std::min(snapshotSlot + d, NUM_SNAPSHOTS));
 			return;
@@ -122,6 +144,9 @@ struct Engine {
 	}
 
 	void turnRight(int d) {
+		if (d == 0)
+			return;
+		editGeneration++;
 		panel.turnRight(editSeq(), d);
 	}
 
@@ -222,6 +247,7 @@ private:
 	}
 
 	void commit() {
+		editGeneration++;
 		pendingCommit = Q_NONE;
 		live = shadow;
 		for (int t = 0; t < NUM_TRACKS; t++)

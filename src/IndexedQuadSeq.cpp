@@ -2,6 +2,7 @@
 #include "Serialize.hpp"
 #include "core/Engine.hpp"
 #include "core/NoteFormat.hpp"
+#include "core/UndoTracker.hpp"
 #include "ui/Components.hpp"
 #include <atomic>
 
@@ -98,6 +99,30 @@ struct IndexedQuadSeq : Module {
 	// Published by process() for the displays.
 	iqs::PanelView view;
 
+	// --- Undo (Ctrl+Z) ---------------------------------------------------------
+	// The sequence only changes on the audio thread, but Rack's history lives on the UI
+	// thread. iqs::UndoTracker (UI thread) decides when to take a copy of the edited
+	// sequence and whether it is a new undo step. Copies travel audio -> UI through
+	// captureRequested -> captured -> captureReady, and undo/redo states travel back
+	// through restoreBuffer -> restoreRequested.
+	std::atomic<uint32_t> editGenerationPub{0};
+	std::atomic<bool> captureRequested{false};
+	std::atomic<bool> captureReady{false};
+	iqs::Sequence captured;
+	std::atomic<bool> restoreRequested{false};
+	iqs::Sequence restoreBuffer;
+	// Set when the edited sequence was replaced wholesale (patch load, initialize, mode
+	// change): the next capture only becomes the new baseline, not an undo step. Rack
+	// records its own undo steps for initialize and preset loads.
+	std::atomic<bool> baselineRequested{true};
+	int lastMode = iqs::MODE_EDIT;
+
+	// UI thread only.
+	iqs::UndoTracker undo;
+
+	void uiStep();
+	void requestRestore(const iqs::Sequence& s);
+
 	IndexedQuadSeq() {
 		config(PARAMS_LEN, INPUTS_LEN, OUTPUTS_LEN, LIGHTS_LEN);
 		for (int f = 0; f < FOCUS_LEN; f++)
@@ -154,6 +179,7 @@ struct IndexedQuadSeq : Module {
 		p.clip.clear();
 		engine.tr.paused = false;
 		engine.liveReplaced();
+		baselineRequested = true;
 	}
 
 	// A short four-track example to play with.
@@ -191,6 +217,8 @@ struct IndexedQuadSeq : Module {
 		seq.tracks[3].loopStart = 1;
 		seq.tracks[3].loopEnd = 2;
 		engine.liveReplaced();
+		// Loading the demo is itself undoable, so it is not a baseline.
+		engine.editGeneration++;
 	}
 
 	float ledBrightness(iqs::Led led) {
@@ -200,10 +228,18 @@ struct IndexedQuadSeq : Module {
 	}
 
 	void process(const ProcessArgs& args) override {
-		if (clearRequested.exchange(false))
+		if (clearRequested.exchange(false)) {
 			onReset();
+			// Unlike Rack's own Initialize, the menu's clear is recorded by our undo.
+			baselineRequested = false;
+			engine.editGeneration++;
+		}
 		if (loadDemoRequested.exchange(false))
 			loadDemo();
+		if (restoreRequested) {
+			engine.restoreEdited(restoreBuffer);
+			restoreRequested = false;
+		}
 
 		// --- Switches.
 		switch ((int) params[TABLE_PARAM].getValue()) {
@@ -215,6 +251,12 @@ struct IndexedQuadSeq : Module {
 			case MODE_POS_FOLLOW: engine.setMode(iqs::MODE_FOLLOW); break;
 			case MODE_POS_HOLD: engine.setMode(iqs::MODE_HOLD); break;
 			default: engine.setMode(iqs::MODE_EDIT); break;
+		}
+		// Undo steps belong to one edited sequence; switching between live and the HOLD
+		// shadow starts afresh.
+		if (engine.mode != lastMode) {
+			lastMode = engine.mode;
+			baselineRequested = true;
 		}
 
 		// --- Buttons and encoders.
@@ -268,6 +310,13 @@ struct IndexedQuadSeq : Module {
 			lights[COMMIT_LIGHT].setBrightness(ledBrightness(engine.commitLed()));
 			view = engine.view();
 		}
+
+		editGenerationPub = engine.editGeneration;
+		if (captureRequested && !captureReady) {
+			captured = engine.editSeq();
+			captureRequested = false;
+			captureReady = true;
+		}
 	}
 
 	json_t* dataToJson() override {
@@ -318,8 +367,59 @@ struct IndexedQuadSeq : Module {
 		if (json_t* j = json_object_get(rootJ, "selectedTrack"))
 			engine.panel.track = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
 		engine.liveReplaced();
+		baselineRequested = true;
 	}
 };
+
+// --- Undo ------------------------------------------------------------------------
+
+// One undo step: the edited sequence before and after a burst of panel activity.
+struct SequenceEditAction : history::ModuleAction {
+	iqs::Sequence before;
+	iqs::Sequence after;
+
+	SequenceEditAction() {
+		name = "edit sequence";
+	}
+	void apply(const iqs::Sequence& s) {
+		IndexedQuadSeq* m = dynamic_cast<IndexedQuadSeq*>(APP->engine->getModule(moduleId));
+		if (m)
+			m->requestRestore(s);
+	}
+	void undo() override {
+		apply(before);
+	}
+	void redo() override {
+		apply(after);
+	}
+};
+
+void IndexedQuadSeq::uiStep() {
+	if (baselineRequested.exchange(false))
+		undo.rebase();
+	bool ready = captureReady;
+	int64_t moduleId = id;
+	undo.step(system::getTime(), editGenerationPub, ready ? &captured : nullptr,
+		[moduleId](const iqs::Sequence& before, const iqs::Sequence& after) {
+			SequenceEditAction* a = new SequenceEditAction;
+			a->moduleId = moduleId;
+			a->before = before;
+			a->after = after;
+			APP->history->push(a);
+		});
+	if (ready)
+		captureReady = false;
+	if (undo.wantCapture && !captureRequested && !captureReady) {
+		captureRequested = true;
+		undo.captureRequested();
+	}
+}
+
+void IndexedQuadSeq::requestRestore(const iqs::Sequence& s) {
+	restoreBuffer = s;
+	restoreRequested = true;
+	undo.restored(s);
+}
 
 // ---------------------------------------------------------------------------
 // Layout, in mm. Measured off the hardware's 26HP panel so the controls sit where a
@@ -411,6 +511,12 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 				return option(v.options);
 			return v.stepInPattern >= 0 ? field(v.step) : std::string("--");
 		});
+	}
+
+	void step() override {
+		if (seq)
+			seq->uiStep();
+		ModuleWidget::step();
 	}
 
 	void appendContextMenu(Menu* menu) override {

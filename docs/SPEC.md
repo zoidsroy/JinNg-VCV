@@ -307,6 +307,15 @@ src/
 ```
 - `core/` 不 include `rack.hpp`，這樣可以在不開 Rack 的情況下，用普通的測試程式驗證時序行為。這是準確重現原機行為的關鍵。
 
+### 5.2.1 復原（Ctrl+Z）
+- 序列只在 audio 執行緒上修改，Rack 的 history 則在 UI 執行緒。`src/core/UndoTracker.hpp` 在 UI 執行緒上判斷何時要記錄一個復原步驟：
+  - 面板停止操作約 0.35 秒後，向 audio 執行緒要一份目前編輯中序列的副本（EDIT/FOLLOW 模式是 live，HOLD 模式是 shadow）。
+  - 副本和上一次記錄的狀態不同，才推入一個「edit sequence」復原步驟。所以一整段轉旋鈕只算一步；只移動游標或切換 focus 不會產生步驟。
+  - 復原時，把舊狀態交回 audio 執行緒寫入。播放游標和編輯游標只在超出範圍時才會被修正。
+- 不在復原範圍內的有：snapshot 的存入、使用者參考表、剪貼簿、游標位置。
+- Rack 的 Initialize 和載入 preset 由 Rack 自己記錄復原步驟；我們只把它們當作新的基準。切換 MODE（live ↔ shadow）也會重設基準。
+- 已知限制：編輯後 0.35 秒內立刻按 Ctrl+Z，那筆編輯還沒被記錄，所以會復原到更早的一步。
+
 ### 5.3 記憶體
 - step 總數上限只有 2000，可以直接預先配置一個固定大小的 step 陣列，用索引串接，完全避免在 engine 執行緒上配置記憶體。HOLD 的 shadow 也預先配置一份。
 

@@ -286,6 +286,70 @@ TEST(holding_track_for_reset_does_not_open_options) {
 	CHECK(!r.e.pressResetButton()); // nothing held: a plain reset
 }
 
+// --- Undo support ------------------------------------------------------------------
+
+TEST(same_content_notices_every_kind_of_change) {
+	Sequence a = threeSteps(2);
+	Sequence b = a;
+	CHECK(a.sameContent(b));
+	b.tracks[0].steps[1].gate = 7;
+	CHECK(!a.sameContent(b));
+	b = a;
+	b.appendPattern(2);
+	CHECK(!a.sameContent(b));
+	b = a;
+	b.tracks[1].tableB.volts[40] = 1.f;
+	CHECK(!a.sameContent(b));
+	b = a;
+	b.tracks[3].math[MATH_GATE].operand = 1;
+	CHECK(!a.sameContent(b));
+	b = a;
+	b.tracks[0].options.clockMul = 2;
+	CHECK(!a.sameContent(b));
+	b = a;
+	b.tracks[0].loopEnd = 1;
+	CHECK(!a.sameContent(b));
+}
+
+TEST(edit_generation_moves_with_panel_activity) {
+	EngineRig r(threeSteps(1));
+	uint32_t g = r.e.editGeneration;
+	r.e.turnRight(0); // no motion, no change
+	CHECK_EQ((int) r.e.editGeneration, (int) g);
+	r.tap(FOCUS_CV_A);
+	r.e.turnRight(1);
+	CHECK(r.e.editGeneration != g);
+}
+
+TEST(restore_puts_back_an_earlier_state) {
+	EngineRig r(threeSteps(1));
+	Sequence before = r.e.live;
+	r.clock();
+	r.clock();
+	r.clock(); // playing step 2
+	r.tap(FOCUS_STEP);
+	r.e.turnLeft(2);
+	r.tap(BUTTON_DELETE);
+	r.tap(BUTTON_DELETE); // two steps gone; cursor and play cursor near the end
+	CHECK_EQ(r.live().numSteps(), 1);
+	r.e.restoreEdited(before);
+	CHECK(r.e.live.sameContent(before));
+	CHECK(r.e.view().stepInPattern >= 0);
+	r.clock(); // playback carries on without tripping over the restored length
+	CHECK(r.playing() >= 0 && r.playing() < 3);
+}
+
+TEST(restore_in_hold_targets_the_shadow) {
+	EngineRig r(threeSteps(1));
+	r.e.setMode(MODE_HOLD);
+	Sequence before = r.e.shadow;
+	r.tap(FOCUS_CV_A);
+	r.e.turnRight(9);
+	r.e.restoreEdited(before);
+	CHECK_EQ((int) r.shadow().steps[0].cvA, 10);
+	CHECK_EQ((int) r.live().steps[0].cvA, 10);
+}
+
 // --- MATH --------------------------------------------------------------------------
 
 TEST(math_add_to_a_pattern) {
