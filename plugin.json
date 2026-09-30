@@ -1,0 +1,23 @@
+{
+  "slug": "JinNg",
+  "name": "Jin Ng",
+  "version": "2.0.0",
+  "license": "proprietary",
+  "brand": "Jin Ng",
+  "author": "Jin Ng",
+  "authorEmail": "",
+  "authorUrl": "https://jin-ng.com",
+  "pluginUrl": "",
+  "manualUrl": "",
+  "sourceUrl": "",
+  "donateUrl": "",
+  "changelogUrl": "",
+  "modules": [
+    {
+      "slug": "IndexedQuadSeq",
+      "name": "Indexed Quad Sequencer",
+      "description": "4-track indexed step sequencer inspired by the ER-101",
+      "tags": ["Sequencer", "Clock modulator"]
+    }
+  ]
+}

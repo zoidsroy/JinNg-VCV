@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- 26HP placeholder panel. Rack's SVG renderer ignores <text>, so real labels must be converted to paths later. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="132.08mm" height="128.5mm" viewBox="0 0 132.08 128.5">
+  <rect x="0" y="0" width="132.08" height="128.5" fill="#1e1f22"/>
+  <!-- display area -->
+  <rect x="6" y="12" width="120.08" height="70" rx="2" fill="#141517" stroke="#3a3c40" stroke-width="0.4"/>
+  <!-- jack area -->
+  <rect x="4" y="90" width="124.08" height="33" rx="2" fill="#26282c"/>
+  <!-- track column separators -->
+  <line x1="30" y1="92" x2="30" y2="121" stroke="#3a3c40" stroke-width="0.3"/>
+  <line x1="54" y1="92" x2="54" y2="121" stroke="#3a3c40" stroke-width="0.3"/>
+  <line x1="78" y1="92" x2="78" y2="121" stroke="#3a3c40" stroke-width="0.3"/>
+  <line x1="102" y1="92" x2="102" y2="121" stroke="#3a3c40" stroke-width="0.3"/>
+</svg>
