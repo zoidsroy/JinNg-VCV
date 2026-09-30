@@ -27,6 +27,9 @@ namespace seg {
 enum : uint8_t { A = 1 << 0, B = 1 << 1, C = 1 << 2, D = 1 << 3, E = 1 << 4, F = 1 << 5, G = 1 << 6 };
 
 inline uint8_t glyph(char ch) {
+	// A char with the high bit set is a raw segment mask (the part overview uses these).
+	if ((unsigned char) ch & 0x80)
+		return (uint8_t) (ch & 0x7f);
 	switch (ch) {
 		case '0': case 'O': return A | B | C | D | E | F;
 		case '1': case 'I': return B | C;

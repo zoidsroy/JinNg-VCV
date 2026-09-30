@@ -90,6 +90,28 @@ ER-102 是 ER-101 的擴充器，放在 ER-101 的**右邊**。它本身沒有�
 
 ---
 
+### 3.4 實作（E2）
+- **資料**：每軌存 100 組 `PartPoints`（RESET TO、LOOP START、LOOP END），跟 loop 點一樣在插入、刪除時跟著位移。所以 snapshot、HOLD/COMMIT、Ctrl+Z 都自動涵蓋 part。
+- **實際播放的 loop 仍然是軌道自己的 loop 點**。part 開始播放時，它的 loop 會複製過去。
+  - 接上 ER-102 時，LOOP START、END、RESET TO 都作用在 focus 中的 part。
+  - 如果 focus 的 part 正在播放，loop 的修改會同步寫到軌道上，立刻聽得到。
+- **第一次接上 ER-102**：如果所有 part 都是空的，各軌目前的 loop 會變成 part 1，不會就此消失。
+- **觸發**：按 TRANSITION 鍵，或 ACTIVATE 上升沿（> 1.5V）觸發。
+  - 從 STOP 出發，或開關在 USER 時，立即切換。其中 USER 不做 reset；從 STOP 出發時，有 RESET TO 的軌道會在下一個 clock 從那一步開始。
+  - FIRST 和 LAST 的切換，發生在 step 開始的那一刻：有 RESET TO 的軌道立刻從該步發聲；沒有的軌道照原本位置繼續播（naked loop）。
+- **「跑完 loop 一次」的定義**（第 3.3 節的未定問題）：軌道發生繞回，也就是播到 loop END 跳回 loop START，或播到軌尾回到開頭。
+  - LAST 只計算還有可播步驟的軌道，從觸發的那一刻開始計算。
+  - reset 本身也算一次繞回。
+- **RESET**：接上 ER-102 時，RESET 會回到播放中 part 的 RESET TO；沒設定的軌道回到第一步。
+- **STOP**（part 0）：不前進、gate 全關，而且不能編輯。
+- **SELECT**：`part = floor(V × 10)`，範圍 0..99。插線時轉左旋鈕會顯示 `PLUG`。ACTIVATE 保持高電位時，pending part 會跟著 SELECT 變化。
+- **快速跳位**：按住 PART 轉左旋鈕，依序經過：第一步 → RESET TO → LOOP START → LOOP END → 最後一步，沒設定的會跳過。
+- **COPY / INSERT / DELETE**（PART focus 時）：複製、貼上、清除 part 在四軌上的設定。貼上時，超出目標軌長度的點會被丟棄。
+- **顯示**：
+  - PART 顯示 focus 中的 part 編號；正在播放的那個會加上小數點。
+  - PART focus 時，INDEX 閃爍顯示 pending 的 part，VOLTAGE 顯示 4 軌的概覽。
+  - PART 的 LED 在有 pending 時閃爍。
+
 ## 4. Groups
 
 ### 4.1 選取

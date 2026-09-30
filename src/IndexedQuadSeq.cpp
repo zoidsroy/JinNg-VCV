@@ -1,4 +1,4 @@
-#include "plugin.hpp"
+﻿#include "plugin.hpp"
 #include "Expander.hpp"
 #include "Serialize.hpp"
 #include "core/Engine.hpp"
@@ -26,6 +26,7 @@ using iqs::FOCUS_CV_B;
 using iqs::FOCUS_DURATION;
 using iqs::FOCUS_GATE;
 using iqs::FOCUS_LEN;
+using iqs::FOCUS_PART;
 using iqs::NUM_SEQUENCER_FOCUS;
 
 static const char* const FOCUS_NAMES[NUM_SEQUENCER_FOCUS] = {
@@ -292,6 +293,11 @@ struct IndexedQuadSeq : Module {
 		// Unplugging the expander lets go of anything held on it.
 		for (int i = 0; i < expander::NUM_BUTTONS; i++)
 			button(expander::BUTTONS[i], ctrl && ctrl->buttons[i]);
+		if (ctrl) {
+			engine.transition = clamp(ctrl->switches[expander::SWITCH_TRANSITION], 0, 2);
+			engine.setPartInputs(ctrl->connected[expander::INPUT_SELECT], ctrl->inputs[expander::INPUT_SELECT],
+			                     ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f);
+		}
 		engine.turnLeft(leftTurns.exchange(0));
 		engine.turnRight(rightTurns.exchange(0));
 
@@ -361,7 +367,9 @@ struct IndexedQuadSeq : Module {
 		out->lights[expander::LIGHT_GROUP_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP));
 		out->lights[expander::LIGHT_MODIFIER_FOCUS] = ledBrightness(p.focusLed(iqs::FOCUS_GROUP_MODIFIER));
 		out->lights[expander::LIGHT_ACTIVATE] = ctrl->inputs[expander::INPUT_ACTIVATE] >= 1.5f;
-		std::snprintf(out->part, sizeof(out->part), "--");
+		out->lights[expander::LIGHT_RESET_TO] = p.resetToLed(engine.editSeq());
+		// The focused part, with a dot when it is the one playing.
+		std::snprintf(out->part, sizeof(out->part), "%d%s", p.focusedPart, p.focusedPart == engine.playingPart ? "." : "");
 		std::snprintf(out->group, sizeof(out->group), "--");
 		rightExpander.module->leftExpander.requestMessageFlip();
 	}
@@ -385,6 +393,8 @@ struct IndexedQuadSeq : Module {
 		json_object_set_new(rootJ, "leftFocus", json_integer(engine.panel.leftFocus));
 		json_object_set_new(rootJ, "rightFocus", json_integer(engine.panel.rightFocus));
 		json_object_set_new(rootJ, "selectedTrack", json_integer(engine.panel.track));
+		json_object_set_new(rootJ, "focusedPart", json_integer(engine.panel.focusedPart));
+		json_object_set_new(rootJ, "playingPart", json_integer(engine.playingPart));
 		return rootJ;
 	}
 
@@ -414,6 +424,13 @@ struct IndexedQuadSeq : Module {
 		if (json_t* j = json_object_get(rootJ, "selectedTrack"))
 			engine.panel.track = clamp((int) json_integer_value(j), 0, NUM_TRACKS - 1);
 		engine.liveReplaced();
+		if (json_t* j = json_object_get(rootJ, "focusedPart"))
+			engine.panel.focusedPart = clamp((int) json_integer_value(j), 0, iqs::NUM_PARTS - 1);
+		if (json_t* j = json_object_get(rootJ, "playingPart")) {
+			engine.playingPart = clamp((int) json_integer_value(j), 0, iqs::NUM_PARTS - 1);
+			engine.tr.stopped = engine.playingPart == iqs::STOP_PART;
+			engine.syncPanelParts();
+		}
 		baselineRequested = true;
 	}
 };
@@ -618,7 +635,10 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 
 		// INDEX and VOLTAGE show the cursor step's entry in the table the TABLE switch picks;
 		// VOLTAGE also shows the panel's messages (AFtr, FULL, TILt, Abrt ...).
+		// With PART focused, INDEX blinks the pending part (if any).
 		addDisplay(L_DISPLAY_X, ROW_TOP, DISPLAY_W, 2, "0", fromView("0", [](const iqs::PanelView& v) {
+			if (v.leftFocus == FOCUS_PART)
+				return v.partPending >= 0 && v.blink ? std::to_string(v.partPending) : std::string("");
 			return std::to_string(v.index);
 		}));
 		addFocus(FOCUS_INDEX, L_BUTTON_X, L_LED_X, ROW_TOP);
@@ -631,6 +651,14 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addDisplay(VOLTAGE_DISPLAY_X, ROW_TOP, VOLTAGE_DISPLAY_W, 4, "0.C.00", fromView("0.C.00", [](const iqs::PanelView& v) {
 			if (v.message)
 				return std::string(v.message);
+			// With PART focused: the focused part at a glance, one digit per track with
+			// bars for RESET TO (top), LOOP START (middle) and LOOP END (bottom).
+			if (v.leftFocus == FOCUS_PART) {
+				std::string bars;
+				for (int t = 0; t < NUM_TRACKS; t++)
+					bars += (char) (0x80 | v.partOverview[t]);
+				return bars;
+			}
 			return v.noteDisplay ? iqs::formatNote(v.voltage) : iqs::formatVoltage(v.voltage);
 		}));
 

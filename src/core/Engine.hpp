@@ -19,6 +19,8 @@ static constexpr int NUM_SNAPSHOTS = 16;
 
 struct Engine {
 	enum Quantize { Q_NONE, Q_STEP, Q_PATTERN, Q_TRACK };
+	// The expander's TRANSITION switch, in its positions' order (0 = handle down).
+	enum Transition { TRANSITION_LAST, TRANSITION_FIRST, TRANSITION_USER };
 	enum SnapshotAction { SNAP_NONE, SNAP_LOAD, SNAP_SAVE };
 
 	Sequence live;
@@ -38,6 +40,16 @@ struct Engine {
 	uint32_t editGeneration = 0;
 
 	int mode = MODE_EDIT;
+	bool expander = false;
+
+	// Parts (docs/SPEC-ER102.md §3). The panel keeps the focused part; which part plays
+	// and which waits is playback state, kept here and mirrored to the panel.
+	int playingPart = 1;
+	int pendingPart = -1;
+	int transition = TRANSITION_FIRST;
+	bool loopDone[NUM_TRACKS] = {}; // LAST: which tracks finished a loop since activation
+	bool activateHigh = false;
+
 	int pendingCommit = Q_NONE;
 	int commitTrack = 0;
 	int pendingReset = Q_NONE;
@@ -58,11 +70,62 @@ struct Engine {
 	// Whether a Sequencer Controller expander is attached. Its buttons arrive through the
 	// same press()/release(), and MATH switches to the five-operation transform.
 	void setExpander(bool attached) {
+		if (attached && !expander && live.partsEmpty()) {
+			// First contact: the loops set so far become part 1 rather than vanishing.
+			adoptLoopsAsPart(live, 1);
+			if (mode == MODE_HOLD)
+				adoptLoopsAsPart(shadow, 1);
+		}
+		if (!attached) {
+			tr.stopped = false;
+			for (int& r : tr.resetTargets)
+				r = -1;
+		}
+		expander = attached;
 		panel.expander = attached;
+	}
+
+	// The expander's SELECT and ACTIVATE jacks, every sample. A patched SELECT picks the
+	// focused part (0.1V per part); a rising ACTIVATE triggers it, and while ACTIVATE
+	// stays high the pending part follows SELECT.
+	void setPartInputs(bool selectPatched, float selectVolts, bool activate) {
+		if (!expander)
+			return;
+		panel.selectPatched = selectPatched;
+		if (selectPatched)
+			panel.focusedPart = std::max(0, std::min((int) std::floor(selectVolts * 10.f), NUM_PARTS - 1));
+		if (activate && !activateHigh)
+			activatePart();
+		else if (activate && pendingPart >= 0)
+			pendingPart = panel.focusedPart;
+		activateHigh = activate;
+		syncPanelParts();
+	}
+
+	// TRANSITION button / ACTIVATE: the focused part becomes pending. From STOP, or with
+	// the switch on USER, it takes over at once.
+	void activatePart() {
+		pendingPart = panel.focusedPart;
+		for (bool& d : loopDone)
+			d = false;
+		if (playingPart == STOP_PART)
+			startPendingPart(true, false);
+		else if (transition == TRANSITION_USER)
+			startPendingPart(false, false);
+		syncPanelParts();
+	}
+
+	// The panel shows (and edits relative to) the playing and pending parts.
+	void syncPanelParts() {
+		panel.playingPart = playingPart;
+		panel.pendingPart = pendingPart;
 	}
 
 	// After `live` was replaced wholesale (patch load, demo, clear).
 	void liveReplaced() {
+		pendingPart = -1;
+		syncPanelParts();
+		tr.stopped = false;
 		tr.rewind(live, false);
 		if (mode == MODE_HOLD)
 			enterHold();
@@ -113,6 +176,11 @@ struct Engine {
 			return;
 		}
 		switch (b) {
+			case BUTTON_TRANSITION:
+				panel.markChord();
+				if (expander)
+					activatePart();
+				return;
 			case BUTTON_COMMIT:
 				panel.markChord();
 				pressCommit();
@@ -173,7 +241,12 @@ struct Engine {
 
 	void process(float dt, bool clockEdge, bool resetEdge, bool resetHeld) {
 		panel.paused = tr.paused;
+		// RESET goes to the playing part's RESET TO steps.
+		for (int t = 0; t < NUM_TRACKS; t++)
+			tr.resetTargets[t] = expander && playingPart != STOP_PART ? live.tracks[t].parts[playingPart].resetTo : -1;
 		tr.process(live, dt, clockEdge, resetEdge, resetHeld);
+		if (expander && pendingPart >= 0)
+			checkPartTransition();
 
 		if (pendingCommit != Q_NONE && reached(pendingCommit, commitTrack))
 			commit();
@@ -193,6 +266,8 @@ struct Engine {
 
 	PanelView view() const {
 		PanelView v = panel.view(editSeq());
+		v.partPlaying = playingPart;
+		v.partPending = pendingPart;
 		v.snapshot = snapshotSlot;
 		if (snapshotArmed != SNAP_NONE)
 			v.message = panel.blinkPhase() ? "Abrt" : "";
@@ -205,6 +280,58 @@ struct Engine {
 	}
 
 private:
+	// --- Parts ---------------------------------------------------------------------
+
+	static void adoptLoopsAsPart(Sequence& seq, int part) {
+		for (Track& t : seq.tracks) {
+			t.parts[part].loopStart = (int16_t) t.loopStart;
+			t.parts[part].loopEnd = (int16_t) t.loopEnd;
+		}
+	}
+
+	// FIRST: the pending part starts as soon as any track finishes its loop (wraps
+	// around). LAST: once every track that is playing something has done so at least once
+	// since the part was triggered. The switch happens as the next step starts.
+	void checkPartTransition() {
+		bool any = false, all = true;
+		for (int t = 0; t < NUM_TRACKS; t++) {
+			const Track& track = live.tracks[t];
+			if (Playhead::firstPlayable(track) < 0)
+				continue;
+			if (tr.events[t] & Transport::EVENT_TRACK) {
+				loopDone[t] = true;
+				any = true;
+			}
+			all = all && loopDone[t];
+		}
+		if (transition == TRANSITION_FIRST ? any : all)
+			startPendingPart(true, true);
+	}
+
+	// The pending part becomes the playing one: every track takes its loop, and with
+	// `reset` the tracks it gives a RESET TO step jump there (sounding now when
+	// `immediate`, else on the next clock). Tracks without one play on from where they
+	// are ("naked loops").
+	void startPendingPart(bool reset, bool immediate) {
+		playingPart = pendingPart;
+		pendingPart = -1;
+		syncPanelParts();
+		tr.stopped = playingPart == STOP_PART;
+		if (tr.stopped)
+			return;
+		for (int t = 0; t < NUM_TRACKS; t++) {
+			const PartPoints p = live.tracks[t].parts[playingPart];
+			live.tracks[t].loopStart = p.loopStart;
+			live.tracks[t].loopEnd = p.loopEnd;
+			if (mode == MODE_HOLD) {
+				shadow.tracks[t].loopStart = p.loopStart;
+				shadow.tracks[t].loopEnd = p.loopEnd;
+			}
+			if (reset && p.resetTo >= 0)
+				tr.rewindTrack(live, t, immediate, p.resetTo);
+		}
+	}
+
 	void enterHold() {
 		shadow = live;
 		shadowTr = tr;

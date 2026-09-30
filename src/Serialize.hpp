@@ -70,6 +70,14 @@ inline json_t* sequenceToJson(const Sequence& seq) {
 		for (const Transform& x : t.transform)
 			json_array_append_new(transformJ, json_pack("[iiiii]", x.add, x.geo, x.jitter, x.random, x.quantize));
 		json_object_set_new(trackJ, "transform", transformJ);
+		// Parts: only the ones that set something, as [part, resetTo, loopStart, loopEnd].
+		json_t* partsJ = json_array();
+		for (int p = 0; p < NUM_PARTS; p++) {
+			const PartPoints& pp = t.parts[p];
+			if (!pp.empty())
+				json_array_append_new(partsJ, json_pack("[iiii]", p, pp.resetTo, pp.loopStart, pp.loopEnd));
+		}
+		json_object_set_new(trackJ, "parts", partsJ);
 		json_array_append_new(tracksJ, trackJ);
 	}
 	return tracksJ;
@@ -97,6 +105,20 @@ inline void sequenceFromJson(Sequence& seq, json_t* tracksJ) {
 			op.type = (uint8_t) clamp((int) json_integer_value(json_array_get(opJ, 0)), 0, MATH_TYPES - 1);
 			int lo = op.type == MATH_ADD || op.type == MATH_GEO ? -MAX_VALUE : 0;
 			op.operand = (int8_t) clamp((int) json_integer_value(json_array_get(opJ, 1)), lo, MAX_VALUE);
+		}
+		json_t* partsJ = json_object_get(trackJ, "parts");
+		for (size_t k = 0; k < json_array_size(partsJ); k++) {
+			json_t* pJ = json_array_get(partsJ, k);
+			int p = (int) json_integer_value(json_array_get(pJ, 0));
+			if (p <= STOP_PART || p >= NUM_PARTS)
+				continue;
+			auto point = [&](size_t i) {
+				int v = (int) json_integer_value(json_array_get(pJ, i));
+				return (int16_t) ((v >= 0 && v < t.numSteps()) ? v : -1);
+			};
+			t.parts[p].resetTo = point(1);
+			t.parts[p].loopStart = point(2);
+			t.parts[p].loopEnd = point(3);
 		}
 		json_t* transformJ = json_object_get(trackJ, "transform");
 		for (int k = 0; k < MATH_PARAMS && k < (int) json_array_size(transformJ); k++) {

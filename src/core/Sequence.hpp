@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Sequence data model (docs/SPEC.md §2). Plain C++11, no Rack dependency, so it can be
 // unit-tested on its own.
 //
@@ -22,6 +22,9 @@ static constexpr int MAX_STEPS_PER_PATTERN = 100;
 static constexpr int TABLE_SIZE = 100;
 static constexpr int MAX_VALUE = 99;
 static constexpr float MAX_VOLTAGE = 8.192f;
+// Parts (expander): 1..99, plus the built-in STOP part 0.
+static constexpr int NUM_PARTS = 100;
+static constexpr int STOP_PART = 0;
 
 struct Step {
 	uint8_t cvA = 12;
@@ -37,6 +40,23 @@ struct Pattern {
 	uint8_t length = 0;
 	bool smoothA = false;
 	bool smoothB = false;
+};
+
+// One part's step assignments on one track (flat step indices, -1 for none).
+struct PartPoints {
+	int16_t resetTo = -1;
+	int16_t loopStart = -1;
+	int16_t loopEnd = -1;
+
+	bool operator==(const PartPoints& o) const {
+		return resetTo == o.resetTo && loopStart == o.loopStart && loopEnd == o.loopEnd;
+	}
+	bool operator!=(const PartPoints& o) const {
+		return !(*this == o);
+	}
+	bool empty() const {
+		return resetTo < 0 && loopStart < 0 && loopEnd < 0;
+	}
 };
 
 // Per-track settings from the track options screen (spec §4.8).
@@ -132,6 +152,9 @@ struct Track {
 	std::array<MathOp, MATH_PARAMS> math;
 	// Its five-operation counterpart, which MATH uses while the expander is connected.
 	TransformSet transform;
+	// Each part's RESET TO step and loop on this track. The loop that actually plays is
+	// loopStart/loopEnd above; a part's loop is copied there when the part starts.
+	std::array<PartPoints, NUM_PARTS> parts;
 
 	Track() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -156,6 +179,7 @@ struct Track {
 		voltageGrain = o.voltageGrain;
 		math = o.math;
 		transform = o.transform;
+		parts = o.parts;
 		return *this;
 	}
 
@@ -228,6 +252,18 @@ struct Sequence {
 		t.loopEnd = -1;
 		t.smoothA = false;
 		t.smoothB = false;
+		for (PartPoints& p : t.parts)
+			p = PartPoints();
+	}
+
+	bool partsEmpty() const {
+		for (const Track& t : tracks) {
+			for (const PartPoints& p : t.parts) {
+				if (!p.empty())
+					return false;
+			}
+		}
+		return true;
 	}
 
 	// Whether two sequences hold the same music (steps, patterns, loops, flags, options,
@@ -262,7 +298,7 @@ struct Sequence {
 				if (a.math[k].type != b.math[k].type || a.math[k].operand != b.math[k].operand)
 					return false;
 			}
-			if (a.transform != b.transform)
+			if (a.transform != b.transform || a.parts != b.parts)
 				return false;
 		}
 		return true;

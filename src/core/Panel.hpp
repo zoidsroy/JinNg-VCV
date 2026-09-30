@@ -73,13 +73,19 @@ enum Table { TABLE_A, TABLE_B, TABLE_REF };
 // LED state for indicators that can blink.
 enum Led { LED_OFF, LED_ON, LED_BLINK };
 
+// Seven-segment bits (a, g, d) for the part overview on the VOLTAGE display.
+static constexpr uint8_t SEG_TOP = 1 << 0;
+static constexpr uint8_t SEG_BOTTOM = 1 << 3;
+static constexpr uint8_t SEG_MIDDLE = 1 << 6;
+
 struct Clipboard {
-	enum Kind { NONE, STEPS, PATTERNS, TRACK, TABLE };
+	enum Kind { NONE, STEPS, PATTERNS, TRACK, TABLE, PART };
 	Kind kind = NONE;
 	std::vector<Step> steps;
 	std::vector<Pattern> patterns;
 	Track track;
 	VoltageTable table;
+	std::array<PartPoints, NUM_TRACKS> part;
 
 	Clipboard() {
 		steps.reserve(MAX_TOTAL_STEPS);
@@ -122,6 +128,13 @@ struct PanelView {
 	TransformSet transform;
 	int transformOp[MATH_PARAMS]; // the operation shown for each parameter
 	int snapshot = 0; // filled in by the Engine: 0 is the blank snapshot "--"
+	// Parts (expander). The overview is one segment mask per track: top bar RESET TO,
+	// middle LOOP START, bottom LOOP END set.
+	int partFocused = 1;
+	int partPlaying = 1;
+	int partPending = -1;
+	uint8_t partOverview[NUM_TRACKS] = {};
+	bool blink = false; // the blink phase, for displays that blink
 };
 
 struct Panel {
@@ -155,6 +168,11 @@ struct Panel {
 	int transformOp[MATH_PARAMS] = {OP_ADD, OP_ADD, OP_ADD, OP_ADD};
 	// INVERT acts on release unless it was held as a modifier (for ROTATE or MATH).
 	bool invertPending = false;
+	// Parts (expander). The Engine owns playing/pending and mirrors them here.
+	int focusedPart = 1;
+	int playingPart = 1;
+	int pendingPart = -1;
+	bool selectPatched = false; // the SELECT jack picks the part, not the LEFT knob
 	Rng rng;
 	int browseIndex = 0; // the voltage table entry INDEX points at
 	int refTable = 0;    // the reference table picked while TABLE is on REF
@@ -211,6 +229,14 @@ struct Panel {
 		if (b == BUTTON_ROTATE) {
 			// With INVERT held it shifts backward instead.
 			rotoinvert(seq, held[BUTTON_INVERT] ? ROTO_SHIFT_BACK : ROTO_SHIFT_FORWARD);
+			return;
+		}
+		if (b == BUTTON_RESET_TO) {
+			toggleResetTo(seq);
+			return;
+		}
+		if (b == BUTTON_DELETE && leftFocus == FOCUS_PART) {
+			clearPart(seq);
 			return;
 		}
 		if ((b == BUTTON_INSERT || b == BUTTON_DELETE) && refuseEdit()) {
@@ -300,7 +326,19 @@ struct Panel {
 			o.clockMul = adjustRatio(o.clockMul, d);
 			return;
 		}
+		// Holding PART: the cursor jumps between the track's landmarks.
+		if (expander && held[FOCUS_PART]) {
+			quickNavigate(seq, d);
+			scrub(tr);
+			return;
+		}
 		switch (leftFocus) {
+			case FOCUS_PART:
+				if (selectPatched)
+					flash("PLUG");
+				else
+					focusedPart = std::max(0, std::min(focusedPart + d, NUM_PARTS - 1));
+				return;
 			case FOCUS_TRACK:
 				track = std::max(0, std::min(track + d, NUM_TRACKS - 1));
 				if (mode == MODE_FOLLOW)
@@ -446,10 +484,14 @@ struct Panel {
 		if ((clip.kind == Clipboard::STEPS && f == FOCUS_STEP) ||
 		    (clip.kind == Clipboard::PATTERNS && f == FOCUS_PATTERN) ||
 		    (clip.kind == Clipboard::TRACK && f == FOCUS_TRACK) ||
-		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX))
+		    (clip.kind == Clipboard::TABLE && f == FOCUS_INDEX) ||
+		    (clip.kind == Clipboard::PART && f == FOCUS_PART))
 			return LED_BLINK;
 		if (mathScreen() && isLeftFocus(f))
 			return f == FOCUS_TRACK + mathRow ? LED_ON : LED_OFF;
+		// The PART LED blinks while a part is waiting to play.
+		if (f == FOCUS_PART && pendingPart >= 0)
+			return LED_BLINK;
 		return (f == leftFocus || f == rightFocus) ? LED_ON : LED_OFF;
 	}
 
@@ -483,7 +525,7 @@ struct Panel {
 	// when the loop point is the pattern's boundary and blinking when it falls inside.
 	Led loopLed(const Sequence& seq, bool start) const {
 		const Track& t = seq.tracks[track];
-		int point = start ? t.loopStart : t.loopEnd;
+		int point = loopPoint(t, start);
 		const EditCursor& c = cursors[track];
 		if (point < 0)
 			return LED_OFF;
@@ -495,6 +537,21 @@ struct Panel {
 			return point == (start ? first : end - 1) ? LED_ON : LED_BLINK;
 		}
 		return point == c.step ? LED_ON : LED_OFF;
+	}
+
+	// With the expander the LOOP buttons and LEDs work on the focused part's loop.
+	int loopPoint(const Track& t, bool start) const {
+		if (expander) {
+			const PartPoints& p = t.parts[focusedPart];
+			return start ? p.loopStart : p.loopEnd;
+		}
+		return start ? t.loopStart : t.loopEnd;
+	}
+
+	// RESET TO LED: the cursor's step is the focused part's reset step.
+	bool resetToLed(const Sequence& seq) const {
+		const EditCursor& c = cursors[track];
+		return expander && c.step >= 0 && c.step == seq.tracks[track].parts[focusedPart].resetTo;
 	}
 
 	PanelView view(const Sequence& seq) const {
@@ -520,6 +577,15 @@ struct Panel {
 		v.mathRow = mathRow;
 		v.math = t.math;
 		v.expander = expander;
+		v.blink = blinkPhase();
+		v.partFocused = focusedPart;
+		v.partPlaying = playingPart;
+		v.partPending = pendingPart;
+		for (int i = 0; i < NUM_TRACKS; i++) {
+			const PartPoints& p = seq.tracks[i].parts[focusedPart];
+			v.partOverview[i] = (uint8_t) ((p.resetTo >= 0 ? SEG_TOP : 0) | (p.loopStart >= 0 ? SEG_MIDDLE : 0) |
+			                               (p.loopEnd >= 0 ? SEG_BOTTOM : 0));
+		}
 		v.transform = t.transform;
 		for (int i = 0; i < MATH_PARAMS; i++)
 			v.transformOp[i] = transformOp[i];
@@ -814,6 +880,10 @@ private:
 			pasteTable(seq);
 			return;
 		}
+		else if (leftFocus == FOCUS_PART && clip.kind == Clipboard::PART) {
+			pastePart(seq);
+			return;
+		}
 		if (!ok)
 			flash("FULL");
 	}
@@ -1005,6 +1075,14 @@ private:
 			clip.clear();
 			return;
 		}
+		// With PART focused, COPY takes the part's step assignments on every track.
+		if (leftFocus == FOCUS_PART) {
+			clip.clear();
+			for (int i = 0; i < NUM_TRACKS; i++)
+				clip.part[i] = seq.tracks[i].parts[focusedPart];
+			clip.kind = Clipboard::PART;
+			return;
+		}
 		// With INDEX focused, COPY takes the whole voltage table the TABLE switch shows.
 		if (leftFocus == FOCUS_INDEX) {
 			clip.clear();
@@ -1048,8 +1126,85 @@ private:
 		}
 		if (target < 0)
 			return;
-		int& point = start ? t.loopStart : t.loopEnd;
-		point = point == target ? -1 : target;
+		if (!expander) {
+			int& point = start ? t.loopStart : t.loopEnd;
+			point = point == target ? -1 : target;
+			return;
+		}
+		if (focusedPart == STOP_PART)
+			return;
+		PartPoints& p = t.parts[focusedPart];
+		int16_t& point = start ? p.loopStart : p.loopEnd;
+		point = (int16_t) (point == target ? -1 : target);
+		followPlayingPart(t);
+	}
+
+	// --- Parts (expander) ----------------------------------------------------------
+
+	// Edits to the playing part's loop are heard at once.
+	void followPlayingPart(Track& t) {
+		if (focusedPart != playingPart)
+			return;
+		t.loopStart = t.parts[focusedPart].loopStart;
+		t.loopEnd = t.parts[focusedPart].loopEnd;
+	}
+
+	// RESET TO sets (or clears) the focused part's reset step on this track.
+	void toggleResetTo(Sequence& seq) {
+		int step = cursor().step;
+		if (!expander || focusedPart == STOP_PART || step < 0)
+			return;
+		int16_t& point = seq.tracks[track].parts[focusedPart].resetTo;
+		point = (int16_t) (point == step ? -1 : step);
+	}
+
+	void clearPart(Sequence& seq) {
+		if (focusedPart == STOP_PART)
+			return;
+		for (int i = 0; i < NUM_TRACKS; i++) {
+			seq.tracks[i].parts[focusedPart] = PartPoints();
+			followPlayingPart(seq.tracks[i]);
+		}
+	}
+
+	void pastePart(Sequence& seq) {
+		if (focusedPart == STOP_PART)
+			return;
+		for (int i = 0; i < NUM_TRACKS; i++) {
+			Track& t = seq.tracks[i];
+			PartPoints p = clip.part[i];
+			// A part copied from a longer track may point past the end of this one.
+			auto fit = [&](int16_t v) { return (int16_t) (v < t.numSteps() ? v : -1); };
+			p.resetTo = fit(p.resetTo);
+			p.loopStart = fit(p.loopStart);
+			p.loopEnd = fit(p.loopEnd);
+			t.parts[focusedPart] = p;
+			followPlayingPart(t);
+		}
+	}
+
+	// Holding PART and turning LEFT walks: first step, RESET TO, LOOP START, LOOP END,
+	// last step (skipping whatever the focused part has not set).
+	void quickNavigate(const Sequence& seq, int d) {
+		const Track& t = seq.tracks[track];
+		int n = t.numSteps();
+		if (n == 0)
+			return;
+		const PartPoints& p = t.parts[focusedPart];
+		int stops[5];
+		int count = 0;
+		const int candidates[5] = {0, p.resetTo, p.loopStart, p.loopEnd, n - 1};
+		for (int v : candidates) {
+			if (v >= 0 && v < n && (count == 0 || stops[count - 1] != v))
+				stops[count++] = v;
+		}
+		int at = 0;
+		for (int i = 0; i < count; i++) {
+			if (stops[i] == cursor().step)
+				at = i;
+		}
+		at = std::max(0, std::min(at + d, count - 1));
+		setCursorStep(t, stops[at]);
 	}
 };
 

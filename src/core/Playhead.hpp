@@ -46,10 +46,15 @@ struct Playhead {
 		return nextPlayable(t, 0);
 	}
 
-	// Rewinds to the first step, ignoring loop points. With `immediate` the first step
-	// starts sounding now; otherwise it starts on the next clock.
-	void reset(const Track& t, bool immediate) {
-		int first = firstPlayable(t);
+	// Rewinds to the first step, ignoring loop points, or to `target` if it is a valid
+	// step (a part's RESET TO step; a zero-length target moves on to the next playable
+	// step). With `immediate` that step starts sounding now; otherwise on the next clock.
+	void reset(const Track& t, bool immediate, int target = -1) {
+		int first;
+		if (target >= 0 && target < t.numSteps())
+			first = t.steps[target].duration > 0 ? target : nextPlayable(t, target);
+		else
+			first = firstPlayable(t);
 		step = first >= 0 ? first : 0;
 		pulse = (immediate && first >= 0) ? 0 : -1;
 	}

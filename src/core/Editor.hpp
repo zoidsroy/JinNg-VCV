@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // Structural edits on a track (docs/SPEC.md §4.4). Every edit keeps the track's
 // invariants: hardware limits, loop points pointing at the same steps, and the play
 // cursor still on the step it was playing. Functions return false and change nothing
@@ -35,18 +35,28 @@ inline int shiftIndex(int idx, int pos, int n) {
 	return idx + n;
 }
 
-inline void shiftAfterInsert(Track& t, Playhead& ph, int pos, int n, bool hadSteps) {
+// Every step reference a track keeps besides the play cursor: its loop and each part's
+// reset and loop steps.
+inline void shiftPoints(Track& t, int pos, int n) {
 	t.loopStart = shiftIndex(t.loopStart, pos, n);
 	t.loopEnd = shiftIndex(t.loopEnd, pos, n);
+	for (PartPoints& p : t.parts) {
+		p.resetTo = (int16_t) shiftIndex(p.resetTo, pos, n);
+		p.loopStart = (int16_t) shiftIndex(p.loopStart, pos, n);
+		p.loopEnd = (int16_t) shiftIndex(p.loopEnd, pos, n);
+	}
+}
+
+inline void shiftAfterInsert(Track& t, Playhead& ph, int pos, int n, bool hadSteps) {
+	shiftPoints(t, pos, n);
 	// Inserting in front of the playing step pushes it back; it keeps playing.
 	if (hadSteps && ph.step >= pos)
 		ph.step += n;
 }
 
 inline void shiftAfterRemove(Track& t, Playhead& ph, int pos, int n) {
-	// A loop point on a deleted step is cleared (spec §3.8, open question 6).
-	t.loopStart = shiftIndex(t.loopStart, pos, -n);
-	t.loopEnd = shiftIndex(t.loopEnd, pos, -n);
+	// A loop point (or part point) on a deleted step is cleared (spec §3.8, question 6).
+	shiftPoints(t, pos, -n);
 	// If the playing step was deleted, playback continues from the step that took its
 	// place; its pulse count carries over so the rhythm does not stumble.
 	if (ph.step >= pos + n)

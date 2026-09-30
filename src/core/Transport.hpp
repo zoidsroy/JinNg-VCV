@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 // CLOCK / RESET / PAUSE handling and everything time-based for the four tracks
 // (docs/SPEC.md §3): per-track clock division and multiplication, trigger-mode gates,
 // and smoothed CV. Takes already-detected edges, so it stays independent of Rack.
@@ -46,6 +46,10 @@ struct Transport {
 
 	int resetMode = RESET_ARMS_FIRST_STEP;
 	bool paused = false;
+	// The STOP part is playing: nothing advances and every gate is closed.
+	bool stopped = false;
+	// Where RESET sends each track (the playing part's RESET TO step), -1 for the first step.
+	int resetTargets[NUM_TRACKS] = {-1, -1, -1, -1};
 	Playhead playheads[NUM_TRACKS];
 	TrackTime times[NUM_TRACKS];
 	uint8_t events[NUM_TRACKS] = {};
@@ -57,11 +61,14 @@ struct Transport {
 	int refreshCountdown = 0;
 
 	void rewind(const Sequence& seq, bool immediate) {
-		for (int t = 0; t < NUM_TRACKS; t++) {
-			playheads[t].reset(seq.tracks[t], immediate);
-			if (!playheads[t].armed())
-				startStep(seq, t);
-		}
+		for (int t = 0; t < NUM_TRACKS; t++)
+			rewindTrack(seq, t, immediate, resetTargets[t]);
+	}
+
+	void rewindTrack(const Sequence& seq, int t, bool immediate, int target) {
+		playheads[t].reset(seq.tracks[t], immediate, target);
+		if (!playheads[t].armed())
+			startStep(seq, t);
 	}
 
 	// One sample. `resetHeld` is the RESET level (input or button); while it stays high
@@ -85,7 +92,7 @@ struct Transport {
 		// clocks, while RESET is still held, are ignored.
 		bool withReset = sinceReset < SIMULTANEOUS_S;
 		bool held = resetHeld && !withReset;
-		bool accepted = clockEdge && !paused && !held;
+		bool accepted = clockEdge && !paused && !held && !stopped;
 		bool swallowed = accepted && withReset && resetStartedStep;
 		if (clockEdge)
 			sinceClock = 0.f;
@@ -103,7 +110,7 @@ struct Transport {
 			Playhead& ph = playheads[t];
 
 			bool multiplied = tt.clock.tick(dt);
-			if (paused || held) {
+			if (paused || held || stopped) {
 				tt.clock.cancel();
 				multiplied = false;
 			}
@@ -129,7 +136,7 @@ struct Transport {
 	}
 
 	bool gate(const Sequence& seq, int t) const {
-		if (paused)
+		if (paused || stopped)
 			return false;
 		const Track& track = seq.tracks[t];
 		if (track.options.triggerMode)
