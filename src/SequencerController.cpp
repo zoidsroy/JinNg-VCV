@@ -128,14 +128,13 @@ struct SequencerControllerWidget : ModuleWidget {
 	SequencerControllerWidget(SequencerController* module) : ctrl(module) {
 		using namespace clayout;
 		setModule(module);
-		setPanel(createPanel(asset::plugin(pluginInstance, "res/SequencerController.svg")));
+		setPanel(createPanel(asset::plugin(pluginInstance, "res/SequencerController.svg"),
+		                      asset::plugin(pluginInstance, "res/SequencerController-dark.svg")));
 
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
-
-		addLabels();
 
 		auto button = [&](ParamWidget* w) { addParam(w); };
 		auto blue = [&](float x, float y, int b) {
@@ -213,87 +212,6 @@ struct SequencerControllerWidget : ModuleWidget {
 		jack(JACK_1, REC_ROW_2, expander::INPUT_AD2);
 		light(JACK_2, 104.7f, SC::STATUS_LIGHT + expander::LIGHT_REC);
 		button(createParamCentered<RedButton>(mm2px(Vec(JACK_2, REC_ROW_2)), module, SC::BUTTON_PARAM + 9)); // PUNCH
-	}
-
-	void addLabels() {
-		using namespace clayout;
-		PanelLabels* p = new PanelLabels;
-		p->box.size = box.size;
-		const float big = 2.6f, small = 2.0f, tiny = 1.7f;
-
-		p->label(35.56f, 4.3f, "SEQUENCER CONTROLLER", 3.2f);
-		p->label(35.56f, 124.2f, "JIN NG", 2.2f);
-
-		// Parts.
-		p->label(COL_1, 11.9f, "RESET TO", small);
-		p->line({Vec(COL_1 + 4.0f, ROW_TOP), Vec(16.2f - 1.4f, ROW_TOP)});
-		p->label(29.0f, 11.9f, "TRANSITION", small);
-		p->line({Vec(35.5f, 11.9f), Vec(BUTTON_X, 11.9f), Vec(BUTTON_X, ROW_TOP - 4.0f)});
-		p->label(25.4f, 14.9f, "user", tiny, NVG_ALIGN_LEFT);
-		p->label(25.4f, 17.4f, "first", tiny, NVG_ALIGN_LEFT);
-		p->label(25.4f, 19.9f, "last", tiny, NVG_ALIGN_LEFT);
-		p->label(45.0f, 11.9f, "STORAGE", small, NVG_ALIGN_LEFT);
-		p->label(50.6f, 14.9f, "user", tiny, NVG_ALIGN_LEFT);
-		p->label(50.6f, 17.4f, "admin", tiny, NVG_ALIGN_LEFT);
-		p->label(50.6f, 19.9f, "eject", tiny, NVG_ALIGN_LEFT);
-		p->label(65.6f, 11.4f, "I/O", tiny);
-		p->label(65.6f, 17.6f, "error", tiny);
-		p->label(DISPLAY_X - DISPLAY_W / 2, 27.4f, "PART", big, NVG_ALIGN_LEFT);
-		p->line({Vec(DISPLAY_X - DISPLAY_W / 2 + 7.6f, 27.4f), Vec(BUTTON_X, 27.4f), Vec(BUTTON_X, ROW_PART - 4.0f)});
-		p->label(JACK_1, 27.4f, "SELECT", small);
-		p->label(JACK_2, 27.4f, "ACTIVATE", small);
-
-		// Groups.
-		p->label(DISPLAY_X - DISPLAY_W / 2, 43.2f, "GROUP", big, NVG_ALIGN_LEFT);
-		p->line({Vec(DISPLAY_X - DISPLAY_W / 2 + 9.6f, 43.2f), Vec(BUTTON_X, 43.2f), Vec(BUTTON_X, ROW_GROUP - 4.0f)});
-		p->line({Vec(7.3f, ROW_GROUP + 1.5f), Vec(7.3f, 57.6f)});
-		p->label(COL_1, 59.1f, "(DE)SELECT", small);
-		p->label(22.2f, 59.1f, "INVERT", small);
-		p->label(BUTTON_X, 59.1f, "ROTATE", small);
-		p->label(3.9f, 74.8f, "GROUP MODIFIERS", big, NVG_ALIGN_LEFT);
-		p->line({Vec(30.6f, 74.8f), Vec(BUTTON_X, 74.8f), Vec(BUTTON_X, ROW_MODIFIER - 4.0f)});
-		p->label(11.2f, 78.1f, "high", tiny, NVG_ALIGN_LEFT);
-		p->label(11.2f, 80.5f, "slope", tiny, NVG_ALIGN_LEFT);
-		p->label(11.2f, 82.9f, "low", tiny, NVG_ALIGN_LEFT);
-		p->label(22.2f, 78.1f, "X", tiny, NVG_ALIGN_LEFT);
-		p->label(22.2f, 80.5f, "Y", tiny, NVG_ALIGN_LEFT);
-		p->label(22.2f, 82.9f, "Z", tiny, NVG_ALIGN_LEFT);
-		static const char* const channels[3] = {"X", "Y", "Z"};
-		for (int c = 0; c < 3; c++) {
-			float y = MOD_ROWS[c];
-			p->label(JACK_1, y - 5.7f, "CV", small);
-			p->label(JACK_2, y - 5.7f, "GATE", small);
-			p->label(56.3f, y - 2.6f, "mod", tiny);
-			p->label(56.3f, y + 0.3f, channels[c], 2.4f);
-			p->line({Vec(54.8f, y - 1.1f), Vec(57.8f, y - 1.1f), Vec(57.8f, y + 1.7f), Vec(54.8f, y + 1.7f), Vec(54.8f, y - 1.1f)});
-		}
-
-		// Recording.
-		p->label(COL_1, 92.1f, "ARM", small);
-		p->label(22.2f, 88.8f, "A-1", small);
-		p->label(22.2f, 91.2f, "(cv-a)", small);
-		p->label(BUTTON_X, 88.8f, "A-2", small);
-		p->label(BUTTON_X, 91.2f, "(cv-b)", small);
-		p->label(JACK_1, 88.8f, "AD-1", small);
-		p->label(JACK_1, 91.2f, "(gate)", small);
-		p->label(JACK_2, 88.5f, "PUNCH", small);
-		p->label(JACK_2, 90.9f, "IN/OUT", small);
-		p->label(COL_1, 103.4f, "RECORD", small);
-		p->label(COL_1, 105.7f, "MODE", small);
-		p->label(11.2f, 110.1f, "alter", tiny, NVG_ALIGN_LEFT);
-		p->label(11.2f, 112.6f, "step", tiny, NVG_ALIGN_LEFT);
-		p->label(11.2f, 115.1f, "real-time", tiny, NVG_ALIGN_LEFT);
-		p->label(22.2f, 104.5f, "D-1", small);
-		p->label(22.2f, 107.0f, "(insert)", small);
-		p->label(BUTTON_X, 104.5f, "D-2", small);
-		p->label(BUTTON_X, 107.0f, "(delete)", small);
-		p->label(JACK_1, 104.5f, "AD-2", small);
-		p->label(JACK_1, 107.0f, "(duration)", small);
-		p->label(59.0f, 104.7f, "REC", small, NVG_ALIGN_RIGHT);
-		p->line({Vec(JACK_2, REC_ROW_1 + 4.2f), Vec(JACK_2, 103.2f)});
-		p->line({Vec(JACK_2, 106.2f), Vec(JACK_2, REC_ROW_2 - 4.0f)});
-
-		addChild(p);
 	}
 };
 

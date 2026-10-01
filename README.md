@@ -1,27 +1,49 @@
-# ER101-VCV
+# Jin Ng — VCV Rack modules
 
-一個受 Orthogonal Devices ER-101 啟發的 4 軌 indexed sequencer，做成 VCV Rack 2 模組。
+- **Indexed Quad Sequencer** (26HP): a four-track step sequencer whose steps store indices into per-track voltage tables. Inspired by the Orthogonal Devices ER-101.
+- **Sequencer Controller** (14HP): an expander for it, adding parts, groups with an X/Y/Z modulation bus, recording, 127 snapshot slots and MIDI file import. Inspired by the Orthogonal Devices ER-102.
 
-- 行為規格：[docs/SPEC.md](docs/SPEC.md)
-- 目前進度：ER-101 手冊全部章節（階段 1–5）與 Ctrl+Z 完成；ER-102 擴充模組（Sequencer Controller）E1–E5 完成，規格見 [docs/SPEC-ER102.md](docs/SPEC-ER102.md)。剩下階段 6：面板美術與上架準備
-- 單元測試：在 MINGW64 shell 中執行 `make test`，不需要 Rack
+Independent re-creations of the hardware's published behaviour, not affiliated with or endorsed by Orthogonal Devices.
 
-## Windows 開發環境
+- **User manual**: [docs/MANUAL.md](docs/MANUAL.md)
+- Behaviour specifications, with every decision taken where the hardware manuals are silent (in Traditional Chinese): [docs/SPEC.md](docs/SPEC.md), [docs/SPEC-ER102.md](docs/SPEC-ER102.md)
+- Changes: [CHANGELOG.md](CHANGELOG.md)
 
-1. 安裝 [MSYS2](https://www.msys2.org/)，開啟 **MSYS2 MINGW64** shell，然後執行：
-   ```bash
-   pacman -Syu
-   # 重新開啟 shell 後：
-   pacman -Syu git wget make tar unzip zip mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake autoconf automake libtool jq python zstd mingw-w64-x86_64-pkgconf
-   ```
-2. 下載 [Rack SDK（Windows x64）](https://vcvrack.com/downloads/Rack-SDK-latest-win-x64.zip)，解壓縮到 `C:\GitWorkspace\Rack-SDK`。
-3. 在 MINGW64 shell 中：
-   ```bash
-   cd /c/GitWorkspace/ER101-VCV
-   export RACK_DIR=/c/GitWorkspace/Rack-SDK
-   make install
-   ```
-   或執行 `scripts/build.sh`，會一次完成 build、測試和安裝。
-   `make install` 會把外掛裝到 `%LOCALAPPDATA%\Rack2\plugins-win-x64`，重新啟動 Rack 就能載入。這台電腦上裝的是 Rack 2 Pro，Pro 版和 Free 版用同一個使用者資料夾。
+License: [GPL-3.0-or-later](LICENSE).
 
-Build 時請暫時關閉防毒軟體的即時掃描，否則編譯會非常慢。
+## Building
+
+On Windows, with [MSYS2](https://www.msys2.org/) (MINGW64 shell):
+
+```bash
+pacman -Syu
+# reopen the shell, then:
+pacman -S --needed git wget make tar unzip zip mingw-w64-x86_64-gcc mingw-w64-x86_64-gdb mingw-w64-x86_64-cmake autoconf automake libtool jq python zstd mingw-w64-x86_64-pkgconf
+```
+
+Unpack the [Rack SDK](https://vcvrack.com/downloads/Rack-SDK-latest-win-x64.zip) next to this repository (as `../Rack-SDK`) or point `RACK_DIR` at it, then:
+
+```bash
+scripts/build.sh      # build, run both test suites, install into Rack's plugin folder
+```
+
+or step by step:
+
+```bash
+make                  # the plugin
+make test             # unit tests for src/core (no Rack needed)
+make test-rack        # serialization round trip (links libRack; set RACK_INSTALL to Rack's folder)
+make install          # into %LOCALAPPDATA%\Rack2\plugins-win-x64
+```
+
+Restart Rack to load a new build. Disable real-time antivirus scanning of the build folder if compiles are slow.
+
+## Layout
+
+| Path | |
+|---|---|
+| `src/core/` | the sequencer itself: plain C++11 with no Rack dependency, covered by `tests/` |
+| `src/IndexedQuadSeq.cpp`, `src/SequencerController.cpp` | the Rack modules: params, jacks, displays, threading, undo |
+| `src/Serialize.hpp` | patch format |
+| `res/` | panels (generated) and button graphics |
+| `scripts/make_panels.py` | generates `res/*.svg`, light and dark, with all text as paths (needs `fontTools`; edit this, not the SVGs) |

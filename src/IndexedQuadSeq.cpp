@@ -107,7 +107,6 @@ struct IndexedQuadSeq : Module {
 	std::atomic<int> leftTurns{0};
 	std::atomic<int> rightTurns{0};
 	std::atomic<bool> loadDemoRequested{false};
-	std::atomic<bool> clearRequested{false};
 	// MIDI import: the UI thread builds the sequence here, the audio thread swaps it in.
 	iqs::Sequence importBuffer;
 	std::atomic<bool> importRequested{false};
@@ -207,7 +206,7 @@ struct IndexedQuadSeq : Module {
 		baselineRequested = true;
 	}
 
-	// A short four-track example to play with.
+	// "Load example sequence": a short four-track example to play with.
 	void loadDemo() {
 		iqs::Sequence& seq = engine.live;
 		seq.clearAll();
@@ -253,12 +252,6 @@ struct IndexedQuadSeq : Module {
 	}
 
 	void process(const ProcessArgs& args) override {
-		if (clearRequested.exchange(false)) {
-			onReset();
-			// Unlike Rack's own Initialize, the menu's clear is recorded by our undo.
-			baselineRequested = false;
-			engine.editGeneration++;
-		}
 		if (loadDemoRequested.exchange(false))
 			loadDemo();
 		if (importRequested) {
@@ -703,10 +696,7 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 			[m]() { return m->engine.tr.resetMode; },
 			[m](int mode) { m->engine.tr.resetMode = mode; }));
 		menu->addChild(createMenuItem("Import MIDI file...", "", [m]() { m->importMidi(); }));
-		menu->addChild(new MenuSeparator);
-		menu->addChild(createMenuLabel("Testing"));
-		menu->addChild(createMenuItem("Load demo sequence", "", [m]() { m->loadDemoRequested = true; }));
-		menu->addChild(createMenuItem("Clear everything", "", [m]() { m->clearRequested = true; }));
+		menu->addChild(createMenuItem("Load example sequence", "", [m]() { m->loadDemoRequested = true; }));
 	}
 
 	void addFocus(int focus, float buttonX, float ledX, float y) {
@@ -728,14 +718,13 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 	IndexedQuadSeqWidget(IndexedQuadSeq* module) : seq(module) {
 		using namespace layout;
 		setModule(module);
-		setPanel(createPanel(asset::plugin(pluginInstance, "res/IndexedQuadSeq.svg")));
+		setPanel(createPanel(asset::plugin(pluginInstance, "res/IndexedQuadSeq.svg"),
+		                      asset::plugin(pluginInstance, "res/IndexedQuadSeq-dark.svg")));
 
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, 0)));
 		addChild(createWidget<ScrewSilver>(Vec(RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
 		addChild(createWidget<ScrewSilver>(Vec(box.size.x - 2 * RACK_GRID_WIDTH, RACK_GRID_HEIGHT - RACK_GRID_WIDTH)));
-
-		addLabels();
 
 		// --- Top strip: TABLE switch, SMOOTH, INDEX, VOLTAGE.
 		addParam(createParamCentered<CKSSThree>(mm2px(Vec(14.0f, ROW_TOP)), module, IndexedQuadSeq::TABLE_PARAM));
@@ -864,110 +853,6 @@ struct IndexedQuadSeqWidget : ModuleWidget {
 		addChild(createLightCentered<MediumLight<RedLight>>(mm2px(Vec(LOOP_BUTTON_X, 89.4f)), module, IndexedQuadSeq::COMMIT_LIGHT));
 		addParam(createParamCentered<RedButton>(mm2px(Vec(LOOP_BUTTON_X, JACK_ROW_1)), module, IndexedQuadSeq::COMMIT_PARAM));
 		addParam(createParamCentered<CKSSThree>(mm2px(Vec(116.4f, 114.0f)), module, IndexedQuadSeq::MODE_PARAM));
-	}
-
-	void addLabels() {
-		using namespace layout;
-		PanelLabels* p = new PanelLabels;
-		p->box.size = box.size;
-
-		const float big = 2.6f, small = 2.0f, tiny = 1.7f;
-		const float labelDy = 6.2f;   // label baseline above a display row
-		const float btnTop = 4.0f;    // half a button
-
-		p->label(66.04f, 4.3f, "INDEXED QUAD SEQUENCER", 3.2f);
-		p->label(66.04f, 124.2f, "JIN NG", 2.2f);
-
-		// TABLE switch legend.
-		p->label(14.0f, 10.3f, "TABLE", small);
-		p->label(10.4f, ROW_TOP - 3.2f, "A", tiny, NVG_ALIGN_RIGHT);
-		p->label(10.4f, ROW_TOP, "ref", tiny, NVG_ALIGN_RIGHT);
-		p->label(10.4f, ROW_TOP + 3.2f, "B", tiny, NVG_ALIGN_RIGHT);
-		p->label(37.2f, ROW_TOP - 3.4f, "smooth", tiny);
-		// Step-to-ramp icon above SMOOTH.
-		p->line({Vec(23.4f, 11.6f), Vec(24.6f, 11.6f), Vec(24.6f, 10.0f), Vec(25.8f, 10.0f)});
-		p->line({Vec(26.4f, 10.8f), Vec(27.6f, 10.8f)});
-		p->line({Vec(27.2f, 10.4f), Vec(27.6f, 10.8f), Vec(27.2f, 11.2f)});
-		p->line({Vec(28.2f, 11.6f), Vec(29.4f, 11.6f), Vec(30.8f, 10.0f), Vec(31.8f, 10.0f)});
-
-		// Display captions with the bracket down to their focus button.
-		auto leftCaption = [&](float row, const char* text, float textW) {
-			float y = row - labelDy;
-			float x0 = L_DISPLAY_X - DISPLAY_W / 2;
-			p->label(x0, y, text, big, NVG_ALIGN_LEFT);
-			p->line({Vec(x0 + textW + 1.0f, y), Vec(L_BUTTON_X, y), Vec(L_BUTTON_X, row - btnTop)});
-		};
-		auto rightCaption = [&](float row, const char* text, float textW, float displayW, float displayX) {
-			float y = row - labelDy;
-			float x1 = displayX + displayW / 2;
-			p->label(x1, y, text, big, NVG_ALIGN_RIGHT);
-			p->line({Vec(x1 - textW - 1.0f, y), Vec(R_BUTTON_X, y), Vec(R_BUTTON_X, row - btnTop)});
-		};
-		leftCaption(ROW_TOP, "INDEX", 9.0f);
-		rightCaption(ROW_TOP, "VOLTAGE", 13.2f, VOLTAGE_DISPLAY_W, VOLTAGE_DISPLAY_X);
-		p->label(122.6f, ROW_TOP + 0.4f, "V", 5.0f, NVG_ALIGN_LEFT);
-
-		const char* leftNames[4] = {"TRACK", "PATTERN", "STEP", "SNAPSHOT"};
-		const float leftW[4] = {9.6f, 12.4f, 7.2f, 15.2f};
-		const char* rightNames[4] = {"CV-A", "CV-B", "DURATION", "GATE"};
-		const float rightW[4] = {7.2f, 7.2f, 15.0f, 7.6f};
-		for (int r = 0; r < 4; r++) {
-			leftCaption(ROWS[r], leftNames[r], leftW[r]);
-			rightCaption(ROWS[r], rightNames[r], rightW[r], DISPLAY_W, R_DISPLAY_X);
-		}
-
-		// Function button captions.
-		auto above = [&](float x, float row, const char* text) {
-			p->label(x, row - labelDy, text, big);
-		};
-		above(FN_COL_1, ROWS[0], "INSERT");
-		above(FN_COL_1, ROWS[1], "DELETE");
-		above(FN_COL_1, ROWS[2], "MATH");
-		above(FN_COL_2, ROWS[2], "COPY");
-		above(FN_COL_1, ROWS[3], "LOAD");
-		above(FN_COL_2, ROWS[3], "SAVE");
-		p->label(36.2f, ROWS[2] - 3.2f, "press", tiny);
-		p->label(36.2f, ROWS[2] + 3.4f, "INSERT", tiny);
-
-		// Loop bracket.
-		const float loopY = ROWS[2] - 11.4f, loopX = 117.4f;
-		p->label(loopX, loopY, "LOOP", big);
-		p->line({Vec(LOOP_LED_X - 2.0f, loopY + 1.6f), Vec(LOOP_LED_X - 2.0f, loopY), Vec(loopX - 5.0f, loopY)});
-		p->line({Vec(loopX + 5.0f, loopY), Vec(126.6f, loopY), Vec(126.6f, loopY + 1.6f)});
-		p->label(LOOP_BUTTON_X, ROWS[2] - 5.6f, "START", small);
-		p->label(LOOP_BUTTON_X, ROWS[3] - 5.6f, "END", small);
-		p->line({Vec(LOOP_LED_X - 1.3f, ROWS[2] - 4.0f), Vec(LOOP_LED_X + 1.3f, ROWS[2] - 4.0f)});
-		p->line({Vec(LOOP_LED_X, ROWS[2] - 4.0f), Vec(LOOP_LED_X, ROWS[3] + 4.0f)});
-		p->line({Vec(LOOP_LED_X - 1.3f, ROWS[3] + 4.0f), Vec(LOOP_LED_X + 1.3f, ROWS[3] + 4.0f)});
-		p->line({Vec(LOOP_LED_X - 0.8f, (ROWS[2] + ROWS[3]) / 2 - 0.8f), Vec(LOOP_LED_X, (ROWS[2] + ROWS[3]) / 2 + 0.4f), Vec(LOOP_LED_X + 0.8f, (ROWS[2] + ROWS[3]) / 2 - 0.8f)});
-
-		// Jack section.
-		p->label(FN_COL_1, 92.4f, "PAUSE", tiny);
-		p->label(26.0f, 91.2f, "CLOCK", big);
-		p->label(26.0f, 106.8f, "RESET", big);
-		p->line({Vec(FN_COL_1 + 4.0f, JACK_ROW_1), Vec(26.0f - 4.2f, JACK_ROW_1)});
-		p->line({Vec(FN_COL_1 + 4.0f, JACK_ROW_2), Vec(26.0f - 4.2f, JACK_ROW_2)});
-
-		for (int t = 0; t < NUM_TRACKS; t++) {
-			float y = t < 2 ? JACK_ROW_1 : JACK_ROW_2;
-			const float* xs = TRACK_JACK_X[t % 2];
-			static const char* const names[NUM_TRACKS] = {"TRACK 1", "TRACK 2", "TRACK 3", "TRACK 4"};
-			float yTitle = y - 8.9f;
-			p->label(xs[1], yTitle, names[t], small);
-			p->line({Vec(xs[0] - 3.0f, yTitle + 1.2f), Vec(xs[0] - 3.0f, yTitle), Vec(xs[1] - 6.0f, yTitle)});
-			p->line({Vec(xs[1] + 6.0f, yTitle), Vec(xs[2] + 3.0f, yTitle), Vec(xs[2] + 3.0f, yTitle + 1.2f)});
-			p->label(xs[0], y - 6.4f, "CV-A", tiny);
-			p->label(xs[1], y - 6.4f, "CV-B", tiny);
-			p->label(xs[2], y - 6.4f, "GATE", tiny);
-		}
-
-		p->label(LOOP_BUTTON_X, 92.4f, "COMMIT", tiny);
-		p->label(LOOP_BUTTON_X, 106.8f, "MODE", big);
-		p->label(119.6f, 110.8f, "hold", tiny, NVG_ALIGN_LEFT);
-		p->label(119.6f, 114.0f, "edit", tiny, NVG_ALIGN_LEFT);
-		p->label(119.6f, 117.2f, "follow", tiny, NVG_ALIGN_LEFT);
-
-		addChild(p);
 	}
 };
 
