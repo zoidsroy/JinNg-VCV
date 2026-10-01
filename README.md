@@ -5,6 +5,7 @@
 
 Independent re-creations of the hardware's published behaviour, not affiliated with or endorsed by Orthogonal Devices.
 
+- **Installing** before the modules are in the VCV Library: [docs/INSTALL.md](docs/INSTALL.md) (Windows build on the [Releases page](https://github.com/zoidsroy/JinNg-VCV/releases/latest))
 - **User manual**: [docs/MANUAL.md](docs/MANUAL.md)
 - Behaviour specifications, with every decision taken where the hardware manuals are silent (in Traditional Chinese): [docs/SPEC.md](docs/SPEC.md), [docs/SPEC-ER102.md](docs/SPEC-ER102.md)
 - Changes: [CHANGELOG.md](CHANGELOG.md)
