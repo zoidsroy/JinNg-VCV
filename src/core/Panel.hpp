@@ -170,7 +170,7 @@ struct Panel {
 	// Set by the host every sample.
 	int mode = MODE_EDIT;
 	bool paused = false;
-	bool expander = false; // a Sequencer Controller is attached
+	bool expander = false; // a SEQ-101ext is attached
 
 	EditCursor cursors[NUM_TRACKS];
 	Clipboard clip;

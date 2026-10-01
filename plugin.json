@@ -7,16 +7,16 @@
   "author": "Jin Ng",
   "authorEmail": "",
   "authorUrl": "https://jin-ng.com",
-  "pluginUrl": "",
-  "manualUrl": "",
-  "sourceUrl": "",
+  "pluginUrl": "https://github.com/zoidsroy/JinNg-VCV",
+  "manualUrl": "https://github.com/zoidsroy/JinNg-VCV/blob/main/docs/MANUAL.md",
+  "sourceUrl": "https://github.com/zoidsroy/JinNg-VCV",
   "donateUrl": "",
-  "changelogUrl": "",
+  "changelogUrl": "https://github.com/zoidsroy/JinNg-VCV/blob/main/CHANGELOG.md",
   "modules": [
     {
       "slug": "IndexedQuadSeq",
-      "name": "Indexed Quad Sequencer",
-      "description": "4-track indexed step sequencer inspired by the ER-101",
+      "name": "SEQ-101",
+      "description": "4-track step sequencer whose steps index per-track voltage tables",
       "tags": [
         "Sequencer",
         "Clock modulator"
@@ -24,8 +24,8 @@
     },
     {
       "slug": "SequencerController",
-      "name": "Sequencer Controller",
-      "description": "Expander for the Indexed Quad Sequencer: parts, groups, recording (ER-102 inspired)",
+      "name": "SEQ-101ext",
+      "description": "Expander for SEQ-101: parts, groups, modulation bus, recording, MIDI import",
       "tags": [
         "Expander",
         "Sequencer"

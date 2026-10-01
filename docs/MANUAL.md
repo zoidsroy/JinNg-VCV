@@ -1,9 +1,9 @@
-# Indexed Quad Sequencer & Sequencer Controller — User Manual
+# SEQ-101 & SEQ-101ext — User Manual
 
 Two VCV Rack 2 modules by Jin Ng:
 
-- **Indexed Quad Sequencer** (26HP) — a four-track, clock-driven step sequencer in which every step stores *indices* into voltage tables rather than voltages. Inspired by the Orthogonal Devices ER-101.
-- **Sequencer Controller** (14HP) — an expander that adds parts, groups with a CV modulation bus, recording, and extended storage. Inspired by the Orthogonal Devices ER-102.
+- **SEQ-101** (26HP) — a four-track, clock-driven step sequencer in which every step stores *indices* into voltage tables rather than voltages. Inspired by the Orthogonal Devices ER-101.
+- **SEQ-101ext** (14HP) — an expander that adds parts, groups with a CV modulation bus, recording, and extended storage. Inspired by the Orthogonal Devices ER-102.
 
 These modules are independent re-creations of the hardware's published behaviour. They are not affiliated with or endorsed by Orthogonal Devices.
 
@@ -21,7 +21,7 @@ These modules are independent re-creations of the hardware's published behaviour
 8. [MATH](#8-math)
 9. [Snapshots](#9-snapshots)
 10. [Reset](#10-reset)
-11. [The Sequencer Controller expander](#11-the-sequencer-controller-expander)
+11. [The SEQ-101ext expander](#11-the-seq-101ext-expander)
 12. [Parts](#12-parts)
 13. [Groups and the modulation bus](#13-groups-and-the-modulation-bus)
 14. [Recording](#14-recording)
@@ -149,7 +149,7 @@ Each track keeps a prepared transform with one operation per step parameter. Hol
 - Release MATH to apply it to the focused step, pattern or track. A result outside 0–99 leaves that value unchanged.
 - While holding MATH, press VOLTAGE to pin the screen (`PIN`); then MATH applies and VOLTAGE (`dOnE`) leaves. DELETE resets the transform.
 
-With the Sequencer Controller attached, MATH becomes the five-operation transform of §11.
+With the SEQ-101ext attached, MATH becomes the five-operation transform of §11.
 
 ## 9. Snapshots
 
@@ -163,9 +163,9 @@ Without the expander there are 16 slots; with it, 127 (§15).
 - By default the next clock then plays the first step. *Reset behaviour* in the context menu can make the reset itself start the first step instead. Clock and reset edges within 1ms of each other count as one event, so patches that derive both from one clock start cleanly on step 1.
 - **Quantized reset**: hold TRACK, PATTERN or STEP and press the RESET button; the reset happens when the selected track reaches the end of its current track, pattern or step.
 
-## 11. The Sequencer Controller expander
+## 11. The SEQ-101ext expander
 
-Place the Sequencer Controller directly to the **right** of the sequencer. It has no knobs of its own: it uses the sequencer's encoders and its INDEX/VOLTAGE displays. On its own, its STORAGE *error* LED lights.
+Place the SEQ-101ext directly to the **right** of the sequencer. It has no knobs of its own: it uses the sequencer's encoders and its INDEX/VOLTAGE displays. On its own, its STORAGE *error* LED lights.
 
 **Five-operation MATH.** With the expander attached, each parameter's transform has five operations applied together:
 `result = Qt( G × (Rd > 0 ? random(0..Rd) : value) + jitter(±Jt) + A )`

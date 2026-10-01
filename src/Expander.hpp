@@ -1,5 +1,5 @@
 #pragma once
-// Messages between the sequencer (IndexedQuadSeq) and the Sequencer Controller expander
+// Messages between the sequencer (IndexedQuadSeq) and the SEQ-101ext expander
 // placed directly to its right (docs/SPEC-ER102.md §8).
 //
 // Rack expander convention: each module owns the buffers for the messages it receives.

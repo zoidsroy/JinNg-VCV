@@ -93,7 +93,7 @@ struct IndexedQuadSeq : Module {
 	// Which Engine buttons are down, from this panel or the expander.
 	bool buttonDown[iqs::BUTTON_LEN] = {};
 
-	// Buffers for what a Sequencer Controller on the right sends us.
+	// Buffers for what a SEQ-101ext on the right sends us.
 	expander::ToSequencer fromController[2];
 
 	dsp::BooleanTrigger pauseTrigger;

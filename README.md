@@ -1,7 +1,7 @@
 # Jin Ng — VCV Rack modules
 
-- **Indexed Quad Sequencer** (26HP): a four-track step sequencer whose steps store indices into per-track voltage tables. Inspired by the Orthogonal Devices ER-101.
-- **Sequencer Controller** (14HP): an expander for it, adding parts, groups with an X/Y/Z modulation bus, recording, 127 snapshot slots and MIDI file import. Inspired by the Orthogonal Devices ER-102.
+- **SEQ-101** (26HP): a four-track step sequencer whose steps store indices into per-track voltage tables. Inspired by the Orthogonal Devices ER-101.
+- **SEQ-101ext** (14HP): an expander for it, adding parts, groups with an X/Y/Z modulation bus, recording, 127 snapshot slots and MIDI file import. Inspired by the Orthogonal Devices ER-102.
 
 Independent re-creations of the hardware's published behaviour, not affiliated with or endorsed by Orthogonal Devices.
 

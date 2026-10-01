@@ -135,7 +135,7 @@ def sequencer():
           '<path d="M2.8,71.8 H71.8 A2.5,2.5 0 0 1 74.3,74.3 V87.0"/>'
           '<line x1="2.8" y1="87.0" x2="129.3" y2="87.0"/></g>')
 
-    p.label(66.04, 4.3, "INDEXED QUAD SEQUENCER", 3.2)
+    p.label(66.04, 4.3, "SEQ-101", 3.2)
     p.label(66.04, 124.2, "JIN NG", 2.2)
 
     # TABLE switch and SMOOTH.
@@ -234,7 +234,7 @@ def controller():
     p.raw('<rect x="60.2" y="9.8" width="2.0" height="13.0" rx="0.4" fill="{slot}"/>')
     p.raw('<rect x="60.7" y="10.4" width="1.0" height="11.8" rx="0.2" fill="{slotInner}"/>')
 
-    p.label(35.56, 4.3, "SEQUENCER CONTROLLER", 3.2)
+    p.label(35.56, 4.3, "SEQ-101ext", 3.2)
     p.label(35.56, 124.2, "JIN NG", 2.2)
 
     # Parts and storage.

@@ -3,8 +3,8 @@
 #include "ui/Components.hpp"
 #include <cstdio>
 
-// The Sequencer Controller expander (docs/SPEC-ER102.md). It has no behaviour of its own:
-// placed directly to the right of an Indexed Quad Sequencer, it forwards its buttons,
+// The SEQ-101ext expander (docs/SPEC-ER102.md). It has no behaviour of its own:
+// placed directly to the right of an SEQ-101, it forwards its buttons,
 // switches and jacks to the sequencer's Engine and shows the lights and displays the
 // sequencer sends back. On its own the STORAGE "error" LED lights, like the hardware
 // without a card.

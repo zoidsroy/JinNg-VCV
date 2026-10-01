@@ -69,7 +69,7 @@ struct Engine {
 		return mode == MODE_HOLD ? shadow : live;
 	}
 
-	// Whether a Sequencer Controller expander is attached. Its buttons arrive through the
+	// Whether a SEQ-101ext expander is attached. Its buttons arrive through the
 	// same press()/release(), and MATH switches to the five-operation transform.
 	void setExpander(bool attached) {
 		if (attached && !expander && live.partsEmpty()) {
