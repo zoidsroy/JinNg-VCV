@@ -33,11 +33,11 @@ jobs:
       - name: Get the Rack SDK
         run: |
           curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-lin-x64.zip"
-          unzip -q sdk.zip -d "$HOME"
+          unzip -q sdk.zip -d ..  # as ../Rack-SDK, where the Makefile looks
       - name: Test
         run: make test
       - name: Build
-        run: make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+        run: make -j4 dist
       - uses: actions/upload-artifact@v4
         with:
           name: lin-x64
@@ -58,14 +58,14 @@ jobs:
       - name: Get the Rack SDK
         run: |
           curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-mac-${{ matrix.arch }}.zip"
-          unzip -q sdk.zip -d "$HOME"
+          unzip -q sdk.zip -d ..  # as ../Rack-SDK, where the Makefile looks
       - name: Test
         if: matrix.cross == ''
         run: make test
       - name: Build
         run: |
           if [ -n "${{ matrix.cross }}" ]; then export CROSS_COMPILE=${{ matrix.cross }}; fi
-          make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+          make -j4 dist
       - uses: actions/upload-artifact@v4
         with:
           name: mac-${{ matrix.arch }}
@@ -80,18 +80,19 @@ jobs:
       - uses: msys2/setup-msys2@v2
         with:
           msystem: MINGW64
+          suppress-deprecation-warnings: msystem-mingw64
           install: >-
             make zip unzip zstd tar
-            mingw-w64-x86_64-gcc mingw-w64-x86_64-jq
+            jq mingw-w64-x86_64-gcc
       - uses: actions/checkout@v4
       - name: Get the Rack SDK
         run: |
           curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-win-x64.zip"
-          unzip -q sdk.zip -d "$HOME"
+          unzip -q sdk.zip -d ..  # as ../Rack-SDK, where the Makefile looks
       - name: Test
         run: make test
       - name: Build
-        run: make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+        run: make -j4 dist
       - uses: actions/upload-artifact@v4
         with:
           name: win-x64
