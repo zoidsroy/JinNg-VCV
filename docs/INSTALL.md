@@ -1,4 +1,5 @@
 # Installing without the VCV Library
+nEnglish | [繁體中文](INSTALL.zh-TW.md)
 
 Until these modules are in the [VCV Library](https://library.vcvrack.com), you can install them by hand. You need VCV Rack 2 (Free or Pro; version 2.6 or later recommended).
 
