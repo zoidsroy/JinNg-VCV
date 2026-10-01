@@ -1,0 +1,119 @@
+# Builds the plugin for every platform Rack supports and runs the core unit tests on each.
+# Pushing a tag v* (or running this by hand with a tag) attaches the .vcvplugin files to
+# that GitHub release, creating it if needed.
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach the builds to (leave empty to only build)'
+        required: false
+
+env:
+  RACK_SDK_VERSION: 2.6.6
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    # An old distribution, so the plugin doesn't need a newer glibc than Rack itself.
+    container: ubuntu:20.04
+    steps:
+      - name: Install tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends build-essential git jq zstd unzip curl ca-certificates
+      - uses: actions/checkout@v4
+      - name: Get the Rack SDK
+        run: |
+          curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-lin-x64.zip"
+          unzip -q sdk.zip -d "$HOME"
+      - name: Test
+        run: make test
+      - name: Build
+        run: make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lin-x64
+          path: dist/*.vcvplugin
+
+  mac:
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            cross: ''
+          - arch: x64
+            cross: x86_64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+      - name: Get the Rack SDK
+        run: |
+          curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-mac-${{ matrix.arch }}.zip"
+          unzip -q sdk.zip -d "$HOME"
+      - name: Test
+        if: matrix.cross == ''
+        run: make test
+      - name: Build
+        run: |
+          if [ -n "${{ matrix.cross }}" ]; then export CROSS_COMPILE=${{ matrix.cross }}; fi
+          make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.arch }}
+          path: dist/*.vcvplugin
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            make zip unzip zstd tar
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-jq
+      - uses: actions/checkout@v4
+      - name: Get the Rack SDK
+        run: |
+          curl -fsSL -o sdk.zip "https://vcvrack.com/downloads/Rack-SDK-$RACK_SDK_VERSION-win-x64.zip"
+          unzip -q sdk.zip -d "$HOME"
+      - name: Test
+        run: make test
+      - name: Build
+        run: make -j4 dist RACK_DIR="$HOME/Rack-SDK"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: dist/*.vcvplugin
+
+  release:
+    needs: [linux, mac, windows]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Attach to the release
+        run: |
+          ls -l artifacts
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$TAG" -R "$GITHUB_REPOSITORY" --title "$TAG" --notes "See CHANGELOG.md."
+          gh release upload "$TAG" artifacts/*.vcvplugin -R "$GITHUB_REPOSITORY" --clobber
