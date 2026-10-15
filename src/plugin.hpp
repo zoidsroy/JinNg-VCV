@@ -8,6 +8,7 @@ extern Plugin* pluginInstance;
 
 extern Model* modelIndexedQuadSeq;
 extern Model* modelSequencerController;
+extern Model* modelBlank;
 
 // The user reference tables, shared by every instance and saved in Rack's settings.
 extern iqs::RefTables gRefTables;

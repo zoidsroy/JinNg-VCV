@@ -8,6 +8,7 @@ void init(Plugin* p) {
 	pluginInstance = p;
 	p->addModel(modelIndexedQuadSeq);
 	p->addModel(modelSequencerController);
+	p->addModel(modelBlank);
 }
 
 // Plugin-wide settings, stored by Rack in settings.json: the user reference tables.
